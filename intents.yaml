@@ -72,6 +72,19 @@ commands:
 # the whole bridge return "Please choose a value for each parameter in this
 # action", including for commands that are themselves fine.
 
+  - command: delete
+    intent: DeleteLoggedFoodIntent
+    summary: Delete a logged entry, by its entry id
+    fixed:
+      deleteWithoutConfirmation: true
+    # foodEntries is an entity array. Binding it needs the identifier AND the
+    # text to display, each pulled from the request dictionary.
+    entities:
+      foodEntries:
+        identifier: entryID
+        display: entryName
+        array: true
+
   - command: goal
     intent: GetGoalIntent
     summary: Read today's protein goal — the read used to smoke-test the bridge

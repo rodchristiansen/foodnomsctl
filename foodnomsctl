@@ -23,6 +23,7 @@ generated bridge Shortcut.
 
   foodnomsctl log <name> [--calories N] [--protein N] [--carbs N] [--fat N]
   foodnomsctl create-food <name> [--brand B] [--barcode B] [--calories N] ...
+  foodnomsctl delete <entry-id|name> [--on YYYY-MM-DD]
   foodnomsctl goal
 
 --json on any subcommand.
@@ -135,16 +136,23 @@ def measure_of(row):
 
 
 ENTRY_COLS = """
-  name, brandOwner, barcode, foodID, baseUnit, baseAmount, measure, quantity,
-  nutrients, calories, date, mealTypeID
+  entryID, name, brandOwner, barcode, foodID, baseUnit, baseAmount, measure,
+  quantity, nutrients, calories, date, mealTypeID
 """
+
+
+def as_uuid(blob):
+    """Ids are stored as the raw 16 bytes; the intents want the string form."""
+    if blob and len(bytes(blob)) == 16:
+        return str(uuid.UUID(bytes=bytes(blob))).upper()
+    return None
 
 
 def as_food(row):
     unit, value = measure_of(row)
     d = {"name": row["name"], "brand": row["brandOwner"], "barcode": row["barcode"],
-         "food_id": row["foodID"], "unit": unit, "unit_quantity": value,
-         "quantity": row["quantity"]}
+         "food_id": row["foodID"], "entry_id": as_uuid(row["entryID"]),
+         "unit": unit, "unit_quantity": value, "quantity": row["quantity"]}
     d.update(nutrients(row))
     return d
 
@@ -189,7 +197,15 @@ def search(con, term):
         key, val = None, t
     hits = []
     for f in catalog(con):
-        if key:
+        if key == "food_id":
+            # Ids are matched on their tail as well as in full. The old store
+            # kept `service` and `serviceID` apart, so anything pinned against
+            # it says `usda:789692` where the live store says
+            # `foodnoms:usda:789692` — the same food, and worth still finding.
+            fid = f.get("food_id") or ""
+            if fid == val or fid.endswith(":" + val):
+                hits.append(f)
+        elif key:
             if (f.get(key) or "") == val:
                 hits.append(f)
         elif val in (f["name"] or "").lower():
@@ -247,7 +263,7 @@ def meals(con, name=None, kind=MEAL):
         blob = c["collectionID"]
         # The id is stored as the raw 16 bytes of a UUID; FoodNoms' LogIntent
         # references a saved meal by that UUID in its canonical string form.
-        meal_id = str(uuid.UUID(bytes=bytes(blob))).upper() if blob and len(blob) == 16 else None
+        meal_id = as_uuid(blob)
         out.append({"name": c["name"], "meal_id": meal_id, "items": items})
     return out
 
@@ -339,7 +355,10 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true")
     jsonopt = argparse.ArgumentParser(add_help=False)
-    jsonopt.add_argument("--json", action="store_true")
+    # SUPPRESS, not the default False: a subparser applies its own defaults over
+    # the namespace, so a plain store_true here silently un-sets a --json given
+    # before the subcommand.
+    jsonopt.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     sub = ap.add_subparsers(
         dest="cmd", required=True,
         parser_class=lambda **kw: argparse.ArgumentParser(parents=[jsonopt], **kw))
@@ -367,10 +386,39 @@ def main():
                        ("--carbs", "carbs"), ("--fat", "fat")):
         cf.add_argument(flag, dest=dest, type=float)
     sub.add_parser("goal", help="today's goal")
+    dl = sub.add_parser("delete", help="delete a logged entry by name or entry id")
+    dl.add_argument("target", help="entry id, or a name to match in a day's log")
+    dl.add_argument("--on", default=date.today().isoformat(),
+                    help="which day to search when matching by name (default today)")
 
     a = ap.parse_args()
     if a.cmd == "doctor":
         sys.exit(doctor())
+
+    if a.cmd == "delete":
+        con = connect()
+        target = a.target
+        if "-" in target and len(target) == 36:
+            entry, name = target.upper(), target
+        else:
+            hits = [e for e in day(con, a.on)["entries"]
+                    if target.lower() in (e["name"] or "").lower()]
+            if not hits:
+                sys.exit(f"no entry matching {target!r} in the log for {a.on}")
+            if len({h["entry_id"] for h in hits}) > 1:
+                print(f"{len(hits)} entries match {target!r} — deleting all:", file=sys.stderr)
+                for h in hits:
+                    print(f"  {h['name']}  {h['entry_id']}", file=sys.stderr)
+            entry, name = hits[0]["entry_id"], hits[0]["name"]
+            for extra in hits[1:]:
+                call_bridge("delete", entryID=extra["entry_id"], entryName=extra["name"])
+        out = call_bridge("delete", entryID=entry, entryName=name)
+        if out is None:
+            print("delete: submitted; the intent did not return. "
+                  "Verify with `foodnomsctl day`.", file=sys.stderr)
+        else:
+            print(out or f"deleted {name}")
+        return
 
     if a.cmd in ("log", "create-food", "goal"):
         fields = {k: v for k, v in vars(a).items() if k not in ("cmd", "json")}

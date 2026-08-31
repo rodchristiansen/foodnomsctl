@@ -145,7 +145,8 @@ def check_commands(commands):
         req = required_params(c["intent"])
         if req is None:
             continue
-        supplied = set(c.get("fixed") or {}) | set(c.get("params") or {})
+        supplied = (set(c.get("fixed") or {}) | set(c.get("params") or {})
+                    | set(c.get("entities") or {}))
         missing = [r for r in req if r not in supplied]
         if missing:
             sys.exit(f"{c['intent']} ({name}): required parameter(s) not supplied: "
@@ -190,6 +191,25 @@ def build(manifest):
             "WFInput": condition_ref(cmd_uuid, VALUE_OUT)}))
 
         params = dict(spec.get("fixed") or {})
+
+        # An entity parameter is not a string: Shortcuts wants a dict carrying
+        # both the identifier and the text to show for it. Supplying that is why
+        # entity-typed parameters ARE bindable after all — the picker is only
+        # unavoidable when there is no identifier to hand it.
+        for key, spec_e in (spec.get("entities") or {}).items():
+            ident, label = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
+            acts.append(action("is.workflow.actions.getvalueforkey", {
+                "UUID": ident, "WFDictionaryKey": spec_e["identifier"],
+                "WFGetDictionaryValueType": "Value",
+                "WFInput": output_ref(dict_uuid, DICT_OUT)}))
+            acts.append(action("is.workflow.actions.getvalueforkey", {
+                "UUID": label, "WFDictionaryKey": spec_e["display"],
+                "WFGetDictionaryValueType": "Value",
+                "WFInput": output_ref(dict_uuid, DICT_OUT)}))
+            entity = {"identifier": var_token(ident, VALUE_OUT),
+                      "displayString": var_token(label, VALUE_OUT)}
+            params[key] = [entity] if spec_e.get("array") else entity
+
         for key in (spec.get("params") or {}):
             pu = str(uuid.uuid4()).upper()
             acts.append(action("is.workflow.actions.getvalueforkey", {
