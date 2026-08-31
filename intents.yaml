@@ -12,6 +12,15 @@
 # enum parameters that have one sensible answer for scripted use. `params` are
 # bound at run time from the request dictionary the CLI passes in.
 #
+# FoodNoms consolidated its logging intents in 2026: LogFoodIntent and
+# LogDrinkIntent are gone, replaced by LogIntent with a `type` enum. Actions
+# written against the old identifiers render as "Unknown Action" and fail with
+# WFActionErrorDomain error 1. LogQuickEntryIntent below is unaffected.
+#
+# docs/app-intents.md carries what LogIntent actually accepts, why omitting a
+# required parameter is correct, and how to read an entity shape back out of the
+# Shortcuts library rather than guessing it.
+#
 # Entity-typed parameters (mealType, foodMeasure, favorite…) are NOT exposed.
 # Shortcuts resolves an entity through its own picker UI, which has no headless
 # equivalent; binding one from text does not work. That is the honest ceiling of
@@ -58,7 +67,8 @@ commands:
 
 # SearchFoodnomsDatabaseIntent is absent too, for a different reason that no
 # metadata reveals: it presents FoodNoms' food picker and blocks until someone
-# chooses. `shortcuts run` never returns. An intent that resolves to entities is
+# chooses. `shortcuts run` never returns. SearchFoodLibraryIntent does the same,
+# despite declaring openAppWhenRun: false. An intent that resolves to entities is
 # liable to do this — being headless is not something the App Intents metadata
 # declares, so the only way to find out is to run it once and watch.
 #

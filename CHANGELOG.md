@@ -40,3 +40,13 @@ Adds the write path. Reads still go straight to SQLite; nothing ever writes the 
   success that did not happen. The fix is to have the shortcut find the entity itself rather
   than be handed an identifier.
 - `--json` before the subcommand is no longer silently un-set by the subparser's own default.
+
+## 0.4.0 — 2026-08-31
+
+- `docs/app-intents.md` — what FoodNoms' App Intents accept, as opposed to what their metadata
+  declares. FoodNoms replaced `LogFoodIntent` and `LogDrinkIntent` with a single `LogIntent`,
+  silently breaking every Shortcut written against the old identifiers; the new one takes a
+  JSON-document entity identifier, requires an `AppIntentDescriptor`, and fails when you supply
+  the parameters it declares as required. Also records that `SearchFoodLibraryIntent` opens a
+  picker despite claiming not to, that `quantity` does nothing without a `foodMeasure`, and how
+  to read an entity shape back out of `Shortcuts.sqlite` instead of guessing it.
