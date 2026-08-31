@@ -184,7 +184,12 @@ def main():
     ap = argparse.ArgumentParser(prog="foodnomsctl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    # --json is accepted before OR after the subcommand: `foodnomsctl --json day`
+    # and `foodnomsctl day --json` both being natural is worth a shared parent
+    # parser, since the second form is what everyone reaches for first.
+    jsonopt = argparse.ArgumentParser(add_help=False)
+    jsonopt.add_argument("--json", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=lambda **kw: argparse.ArgumentParser(parents=[jsonopt], **kw))
     c = sub.add_parser("catalog"); c.add_argument("--min-count", type=int, default=1); c.add_argument("--since")
     s = sub.add_parser("search"); s.add_argument("term")
     r = sub.add_parser("resolve"); r.add_argument("term")
