@@ -19,6 +19,7 @@
 # item reference.
 
 bundle: com.algebraiclabs.foodnoms
+team: 32642VZFU3
 shortcut_name: FoodNomsCTL Bridge
 
 commands:
@@ -39,19 +40,12 @@ commands:
       sugars: {type: number}
       sodium: {type: number}
 
-  - command: log-weight
-    intent: LogWeightIntent
-    summary: Log a body weight entry
-    fixed:
-      dayOption: today
-    params:
-      weight: {type: number, required: true}
-
   - command: create-food
     intent: CreateFoodIntent
     summary: Create a food in the library
     fixed:
       normalizationMode: perServing
+      immediatelySave: true
     params:
       name: {type: text, required: true}
       brand: {type: text}
@@ -62,25 +56,36 @@ commands:
       carbs: {type: number}
       fat: {type: number}
 
-  - command: db-search
-    intent: SearchFoodnomsDatabaseIntent
-    summary: Search FoodNoms' online food database, not the local log
-    fixed:
-      scope: all
-      limit: 10
-    params:
-      query: {type: text, required: true}
-
-  - command: ask
-    intent: AskFoodnomsAIIntent
-    summary: Ask FoodNoms AI a question
-    params:
-      query: {type: text, required: true}
+# SearchFoodnomsDatabaseIntent is absent too, for a different reason that no
+# metadata reveals: it presents FoodNoms' food picker and blocks until someone
+# chooses. `shortcuts run` never returns. An intent that resolves to entities is
+# liable to do this — being headless is not something the App Intents metadata
+# declares, so the only way to find out is to run it once and watch.
+#
+# AskFoodnomsAIIntent is deliberately absent. Its required parameters include
+# mealType, which is entity-typed, and Shortcuts resolves an entity through
+# picker UI — there is no value a generated action can put there. Same for
+# LogWeightIntent, whose `weight` is a measurement rather than a primitive and
+# needs a magnitude/unit payload this generator does not model yet. Both fail at
+# run time, not import time, and Shortcuts validates every action in the
+# workflow before running any of them: one unsatisfiable action anywhere makes
+# the whole bridge return "Please choose a value for each parameter in this
+# action", including for commands that are themselves fine.
 
   - command: goal
     intent: GetGoalIntent
-    summary: Read today's goal — the one read used to smoke-test the bridge
+    summary: Read today's protein goal — the read used to smoke-test the bridge
+    # Enum parameters serialize as bare strings, but an entity-backed one like
+    # goalTypes needs its whole display payload, not just the value. A bare
+    # "allGoals" imports fine and then fails at run time with "Please choose a
+    # value for each parameter in this action" — the editor cannot render a
+    # half-specified entity, so it treats it as unset.
     fixed:
-      scope: allGoals
+      scope: goal
       dayOption: today
+      goalTypes:
+        identifier: protein
+        value: protein
+        title: {key: Protein}
+        subtitle: {key: Protein}
     params: {}

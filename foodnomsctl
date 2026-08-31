@@ -1,94 +1,180 @@
 #!/usr/bin/env python3
 """foodnomsctl — the FoodNoms CLI for macOS and AI agents.
 
-FoodNoms keeps a CloudKit-mirrored Core Data store in its app group container.
-Every logged entry carries the food's service identifiers, barcode, unit and
-full nutrition, which makes the log itself the library: anything ever scanned
-or logged is queryable here, offline, without opening the app.
+FoodNoms keeps its data in a local GRDB (SQLite) database inside the app's
+sandbox container. Every logged entry is denormalized — it carries the food's
+name, brand, barcode, unit, serving measure and full nutrition — which makes the
+log itself the library: anything ever scanned or logged is queryable here,
+offline, with no API and no account.
 
 Read-only by design. The store is snapshotted before every read so a running
-FoodNoms.app never contends on the WAL, and nothing is ever written back.
+FoodNoms.app never contends on the write-ahead log, and nothing is ever written
+back: the store is CloudKit-mirrored, so a row inserted behind the app's back
+would never sync. Writes go through FoodNoms' own App Intents, dispatched by a
+generated bridge Shortcut.
 
   foodnomsctl catalog [--min-count N] [--since YYYY-MM-DD]
   foodnomsctl search <term>
-  foodnomsctl resolve <term|barcode:NNN|id:SERVICEID>
+  foodnomsctl resolve <term|barcode:NNN|id:FOODID>
   foodnomsctl day [YYYY-MM-DD]
   foodnomsctl meals [name]
   foodnomsctl resolve-meal <name>
   foodnomsctl doctor
 
-Writes go through App Intents, never the store:
-
   foodnomsctl log <name> [--calories N] [--protein N] [--carbs N] [--fat N]
-  foodnomsctl log-weight <lbs>
   foodnomsctl create-food <name> [--brand B] [--barcode B] [--calories N] ...
-  foodnomsctl db-search <query>
-  foodnomsctl ask <question>
   foodnomsctl goal
 
 --json on any subcommand.
 """
-import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, uuid
-from datetime import datetime, date, timedelta
+import argparse
+import glob
+import json
+import os
+import plistlib
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import uuid
+from datetime import date, datetime
 
-STORE = os.path.expanduser(
-    "~/Library/Group Containers/group.com.algebraiclabs.foodnoms/FoodNoms.sqlite")
-APPLE_EPOCH = 978307200
+BUNDLE = "com.algebraiclabs.foodnoms"
+BRIDGE = "FoodNomsCTL Bridge"
+
+# FoodNoms has moved its store twice. The Core Data one in the app group
+# container stops in 2022 and the group-container GRDB copy stops in 2025; both
+# are still on disk and both look plausible. The live store is in the app's
+# sandbox container, whose directory name is a random UUID that differs per
+# machine — so it has to be discovered, never hardcoded.
+LEGACY = [
+    os.path.expanduser(f"~/Library/Group Containers/group.{BUNDLE}/FoodNoms.sqlite"),
+    os.path.expanduser(f"~/Library/Group Containers/group.{BUNDLE}/{BUNDLE}/db.db"),
+]
 
 
-def connect():
-    if not os.path.exists(STORE):
-        sys.exit(f"FoodNoms store not found at {STORE}")
-    tmp = tempfile.mkdtemp(prefix="foodnoms.")
-    dst = os.path.join(tmp, "FoodNoms.sqlite")
-    shutil.copy2(STORE, dst)
+def find_store():
+    """The db.db belonging to FoodNoms' sandbox container."""
+    pattern = os.path.expanduser("~/Library/Containers/*/Data/Documents/db.db")
+    for path in glob.glob(pattern):
+        container = path.split("/Data/")[0]
+        meta = os.path.join(container, ".com.apple.containermanagerd.metadata.plist")
+        try:
+            with open(meta, "rb") as fh:
+                identity = plistlib.load(fh)
+        except OSError:
+            continue
+        if BUNDLE in str(identity.get("MCMMetadataIdentifier", "")):
+            return path
+    return None
+
+
+def connect(path=None):
+    store = path or find_store()
+    if not store:
+        sys.exit("FoodNoms store not found — is FoodNoms installed and has it run once?")
+    tmp = tempfile.mkdtemp(prefix="foodnomsctl.")
+    dst = os.path.join(tmp, "db.db")
+    shutil.copy2(store, dst)
     for ext in ("-wal", "-shm"):
-        if os.path.exists(STORE + ext):
-            shutil.copy2(STORE + ext, dst + ext)
+        if os.path.exists(store + ext):
+            shutil.copy2(store + ext, dst + ext)
     con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     return con
 
 
-def ts(v):
-    return datetime.fromtimestamp(v + APPLE_EPOCH).isoformat(" ", "seconds") if v else None
+MACROS = ("protein", "carbs", "fat", "fiber", "sugars", "sodium")
 
 
-FOOD_COLS = """
-  ZNAME name, ZSERVICE service, ZSERVICEID service_id, ZBARCODE barcode,
-  ZUNIT unit, ZUNITQUANTITY unit_quantity, ZQUANTITY quantity,
-  ZHOUSEHOLDSERVINGFULLTEXT household, ZSERVINGSIZE serving_size,
-  ZSERVINGSIZEUNIT serving_size_unit,
-  ZCALORIES calories, ZPROTEIN protein, ZCARBS carbs, ZFAT fat,
-  ZFIBER fiber, ZSUGARS sugars, ZSODIUM sodium, ZDATE date
+def nutrients(row):
+    """Macros as actually eaten, not per base amount.
+
+    The `nutrients` JSON is per `baseAmount` of `baseUnit` — 100g, 15ml, one
+    serving — while the entry records how much was eaten in whatever unit the
+    user picked. Scaling by quantity x measure.value only works when that unit
+    IS the base unit; log a tablespoon of a per-100g food and it is out by a
+    factor of ten, which is how a tablespoon of chia seeds becomes 486 kcal.
+
+    The `calories` column already holds the scaled figure, so the ratio between
+    it and the per-base calories gives the factor for every other macro, with no
+    unit conversion table to get wrong.
+    """
+    try:
+        n = json.loads(row["nutrients"] or "{}")
+    except (ValueError, TypeError):
+        n = {}
+    eaten = row["calories"]
+    base = n.get("calories")
+
+    if base and eaten is not None:
+        factor = eaten / base
+    else:
+        # Zero-calorie foods (water, creatine) give no ratio to work from. Fall
+        # back to the direct calculation, which is exact when the units agree.
+        m = json.loads(row["measure"] or "{}") if row["measure"] else {}
+        if m.get("unit") == row["baseUnit"] and row["baseAmount"]:
+            factor = (row["quantity"] or 1) * (m.get("value") or 1) / row["baseAmount"]
+        else:
+            factor = row["quantity"] or 1
+
+    out = {"calories": eaten if eaten is not None else (base or 0) * factor}
+    for k in MACROS:
+        v = n.get(k)
+        out[k] = round(v * factor, 2) if v is not None else None
+    return out
+
+
+def measure_of(row):
+    try:
+        m = json.loads(row["measure"] or "{}")
+    except (ValueError, TypeError):
+        m = {}
+    return m.get("unit") or row["baseUnit"], m.get("value")
+
+
+ENTRY_COLS = """
+  name, brandOwner, barcode, foodID, baseUnit, baseAmount, measure, quantity,
+  nutrients, calories, date, mealTypeID
 """
 
 
+def as_food(row):
+    unit, value = measure_of(row)
+    d = {"name": row["name"], "brand": row["brandOwner"], "barcode": row["barcode"],
+         "food_id": row["foodID"], "unit": unit, "unit_quantity": value,
+         "quantity": row["quantity"]}
+    d.update(nutrients(row))
+    return d
+
+
 def catalog(con, min_count=1, since=None):
-    """One row per distinct food, taking the most recently logged entry as
-    canonical — units and serving sizes drift as brands change, and the most
-    recent log is by definition the product currently being bought."""
-    where, params = "WHERE ZSERVICEID IS NOT NULL", []
+    """One row per distinct food, the most recent logging taken as canonical.
+
+    Units, serving sizes and macros drift as brands reformulate, so the latest
+    entry describes what is actually in the cupboard now. The count that comes
+    with it is a good proxy for how much a food matters.
+    """
+    where, params = "WHERE name IS NOT NULL", []
     if since:
-        where += " AND ZDATE >= ?"
-        params.append(
-            (datetime.strptime(since, "%Y-%m-%d") - datetime(1970, 1, 1)).total_seconds()
-            - APPLE_EPOCH)
+        where += " AND date >= ?"
+        params.append(since)
     rows = con.execute(f"""
-      SELECT {FOOD_COLS}, cnt, last_logged FROM (
-        SELECT *, COUNT(*) OVER (PARTITION BY ZSERVICEID) cnt,
-               MAX(ZDATE) OVER (PARTITION BY ZSERVICEID) last_logged,
-               ROW_NUMBER() OVER (PARTITION BY ZSERVICEID ORDER BY ZDATE DESC) rn
-        FROM ZFOODENTRY {where})
+      SELECT {ENTRY_COLS}, cnt, last_logged FROM (
+        SELECT *, COUNT(*) OVER (PARTITION BY COALESCE(foodID, name)) cnt,
+               MAX(date) OVER (PARTITION BY COALESCE(foodID, name)) last_logged,
+               ROW_NUMBER() OVER (PARTITION BY COALESCE(foodID, name)
+                                  ORDER BY date DESC) rn
+        FROM foodEntryRecord {where})
       WHERE rn = 1 AND cnt >= ?
       ORDER BY cnt DESC, name
     """, params + [min_count]).fetchall()
     out = []
     for r in rows:
-        d = dict(r)
-        d["last_logged"] = ts(d.pop("last_logged"))
-        d.pop("date", None)
-        d["count"] = d.pop("cnt")
+        d = as_food(r)
+        d["count"] = r["cnt"]
+        d["last_logged"] = r["last_logged"]
         out.append(d)
     return out
 
@@ -98,7 +184,7 @@ def search(con, term):
     if t.startswith("barcode:"):
         key, val = "barcode", t.split(":", 1)[1]
     elif t.startswith("id:"):
-        key, val = "service_id", term.split(":", 1)[1]
+        key, val = "food_id", term.split(":", 1)[1]
     else:
         key, val = None, t
     hits = []
@@ -111,64 +197,68 @@ def search(con, term):
     return hits
 
 
+UNIX_EPOCH_JD = 2440587.5
+
+
+def julian_day(when):
+    """FoodNoms' own key for a calendar day, as a Julian day number."""
+    d = datetime.strptime(when, "%Y-%m-%d").date()
+    return (d - date(1970, 1, 1)).days + UNIX_EPOCH_JD
+
+
 def day(con, when):
-    lo = (datetime.strptime(when, "%Y-%m-%d") - datetime(1970, 1, 1)).total_seconds() - APPLE_EPOCH
+    """A day's log. Entries belonging to a saved meal or recipe are excluded —
+    they are components of a stored item, not separate things eaten.
+
+    Filtered on the `day` column, not on `date`. Dates are stored in UTC, so an
+    evening entry in Vancouver lands on the following UTC date; a date-range
+    window would take yesterday evening and drop this evening. The `day` column
+    is the app's own local-day key and is what the log screen groups by.
+    """
     rows = con.execute(f"""
-      SELECT {FOOD_COLS}, ZMEAL meal FROM ZFOODENTRY
-      WHERE ZDATE >= ? AND ZDATE < ? AND ZMEALENTITY IS NULL AND ZRECIPEENTITY IS NULL
-      ORDER BY ZDATE
-    """, (lo, lo + 86400)).fetchall()
+      SELECT {ENTRY_COLS} FROM foodEntryRecord
+      WHERE day = ? AND collectionEditID IS NULL
+      ORDER BY date
+    """, (julian_day(when),)).fetchall()
     entries = []
     for r in rows:
-        d = dict(r)
-        d["date"] = ts(d["date"])
+        d = as_food(r)
+        d["date"] = r["date"]
         entries.append(d)
-    totals = {k: round(sum(e[k] or 0 for e in entries), 1)
+    totals = {k: round(sum(e.get(k) or 0 for e in entries), 1)
               for k in ("calories", "protein", "carbs", "fat", "fiber", "sugars", "sodium")}
     return {"date": when, "totals": totals, "entries": entries}
 
 
-def meals(con, name=None):
-    """Saved FoodNoms Meals. ZMEALID is the raw 16 bytes of the UUID that a
-    Shortcut's LogMealIntent references, so a meal is addressable by name."""
+# collectionType 2 is a saved Meal, 3 is a Recipe.
+MEAL, RECIPE = 2, 3
+
+
+def meals(con, name=None, kind=MEAL):
     out = []
-    for m in con.execute("SELECT Z_PK, ZNAME, ZMEALID FROM ZMEAL ORDER BY ZNAME"):
-        if name and name.lower() not in (m["ZNAME"] or "").lower():
+    for c in con.execute("""SELECT id, collectionID, collectionEditID, name
+                            FROM foodCollectionRecord WHERE collectionType = ?
+                            ORDER BY name""", (kind,)):
+        if name and name.lower() not in (c["name"] or "").lower():
             continue
-        items = [dict(r) for r in con.execute(
-            f"SELECT {FOOD_COLS} FROM ZFOODENTRY WHERE ZMEALENTITY = ? ORDER BY ZMEALSORTINDEX",
-            (m["Z_PK"],))]
-        for it in items:
-            it.pop("date", None)
-        blob = m["ZMEALID"]
+        items = [as_food(r) for r in con.execute(
+            f"SELECT {ENTRY_COLS} FROM foodEntryRecord WHERE collectionEditID = ? "
+            "ORDER BY collectionSortIndex", (c["collectionEditID"],))]
+        blob = c["collectionID"]
+        # The id is stored as the raw 16 bytes of a UUID; FoodNoms' LogIntent
+        # references a saved meal by that UUID in its canonical string form.
         meal_id = str(uuid.UUID(bytes=bytes(blob))).upper() if blob and len(blob) == 16 else None
-        out.append({"name": m["ZNAME"], "meal_id": meal_id, "items": items})
+        out.append({"name": c["name"], "meal_id": meal_id, "items": items})
     return out
 
 
-def fmt_food(f, indent=""):
-    q = f"{f['quantity']:g}" if f.get("quantity") is not None else "?"
-    unit = f.get("household") or f.get("unit") or ""
-    uq = f.get("unit_quantity")
-    if uq and uq != 1:
-        unit = f"{uq:g} {unit}"
-    macro = f"{f['protein'] or 0:.0f}p {f['calories'] or 0:.0f}kcal"
-    return f"{indent}{f['name']}  [{q} × {unit}]  {macro}"
-
-
-BRIDGE = "FoodNomsCTL Bridge"
-
-
-def call_bridge(command, **params):
+def call_bridge(command, timeout=25, **params):
     """Dispatch one App Intent through the bridge Shortcut.
 
-    macOS has no way to invoke another app's App Intent directly, so a Shortcut
-    is the only supported write path. `shortcuts run` takes the request as a
-    file and writes the result to another, so both ends are temp files.
-
-    Nothing here touches the FoodNoms store. It is CloudKit-mirrored: a row
-    written behind the app's back gets no CKRecord, never reaches the phone, and
-    can leave the export bookkeeping inconsistent with the object graph.
+    macOS cannot invoke another app's App Intent directly, so a Shortcut is the
+    only supported write path. Some FoodNoms intents complete the write and then
+    do not return — the entry lands, `shortcuts run` simply never exits — so
+    this bounds the wait rather than hanging the caller forever.
     """
     payload = {"command": command}
     payload.update({k: v for k, v in params.items() if v is not None})
@@ -177,73 +267,85 @@ def call_bridge(command, **params):
     try:
         with open(req, "w") as fh:
             json.dump(payload, fh)
-        r = subprocess.run(["shortcuts", "run", BRIDGE, "-i", req, "-o", res],
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            err = (r.stderr or "").strip()
+        proc = subprocess.run(["shortcuts", "run", BRIDGE, "-i", req, "-o", res],
+                              capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            err = (proc.stderr or "").strip()
             if "not find" in err.lower():
                 sys.exit(f"{err}\nInstall the bridge: ./foodnomsctl-bridge --publish")
-            sys.exit(err or f"shortcuts run failed ({r.returncode})")
+            sys.exit(err or f"shortcuts run failed ({proc.returncode})")
+    except subprocess.TimeoutExpired:
+        subprocess.run(["pkill", "-f", f"shortcuts run {BRIDGE}"], capture_output=True)
+        return None
+    finally:
+        out = ""
         if os.path.exists(res):
             with open(res, encoding="utf-8", errors="replace") as fh:
-                return fh.read().strip()
-        return ""
-    finally:
+                out = fh.read().strip()
         shutil.rmtree(tmp, ignore_errors=True)
+    return out
 
 
 def doctor():
-    """What a user needs to see when the CLI cannot find their food."""
-    ok = True
     print("foodnomsctl doctor\n")
-    print(f"  store path   {STORE}")
-    if not os.path.exists(STORE):
-        print("  [FAIL] store not found — is FoodNoms installed and has it synced once?")
+    store = find_store()
+    if not store:
+        print("  [FAIL] no FoodNoms store found in any sandbox container")
+        print("         Is FoodNoms installed, and has it been opened at least once?")
         return 1
-    size = os.path.getsize(STORE)
-    print(f"  [OK]   store present ({size/1_048_576:.1f} MB)")
+    print(f"  [OK]   store {store}")
+    print(f"         {os.path.getsize(store) / 1_048_576:.1f} MB, modified "
+          f"{datetime.fromtimestamp(os.path.getmtime(store)):%Y-%m-%d %H:%M}")
+
+    for old in LEGACY:
+        if os.path.exists(old):
+            print(f"  [note] ignoring abandoned store {old}")
+
     try:
-        con = connect()
-    except SystemExit:
-        raise
-    except Exception as e:
-        print(f"  [FAIL] cannot open store: {e}")
-        print("         The app group container is TCC-protected. Grant Full Disk")
-        print("         Access to the terminal or agent host running foodnomsctl.")
-        return 1
-    try:
-        entries = con.execute("SELECT COUNT(*) FROM ZFOODENTRY").fetchone()[0]
+        con = connect(store)
+        entries = con.execute("SELECT COUNT(*) FROM foodEntryRecord").fetchone()[0]
+        newest = con.execute("SELECT MAX(date) FROM foodEntryRecord").fetchone()[0]
         foods = len(catalog(con))
         saved = len(meals(con))
     except sqlite3.Error as e:
         print(f"  [FAIL] schema not as expected: {e}")
-        print("         FoodNoms may have migrated its Core Data model.")
+        print("         FoodNoms may have migrated its database again.")
         return 1
-    print(f"  [OK]   {entries} logged entries")
+    print(f"  [OK]   {entries} logged entries, newest {newest}")
     print(f"  [OK]   {foods} distinct foods")
     print(f"  [OK]   {saved} saved meals")
 
     installed = subprocess.run(["shortcuts", "list"], capture_output=True, text=True)
     if BRIDGE in (installed.stdout or ""):
-        print(f"  [OK]   write path: \"{BRIDGE}\" installed")
+        print(f'  [OK]   write path: "{BRIDGE}" installed')
     else:
-        print(f"  [WARN] write path: \"{BRIDGE}\" not installed — reads work,")
-        print("         writes will fail. Build and import it with:")
-        print("           ./foodnomsctl-bridge --publish")
-    return 0 if ok else 1
+        print(f'  [WARN] write path: "{BRIDGE}" not installed — reads work, writes')
+        print("         will fail. Build and import it: ./foodnomsctl-bridge --publish")
+    return 0
+
+
+def fmt_food(f, indent=""):
+    q = f"{f['quantity']:g}" if f.get("quantity") is not None else "?"
+    unit = f.get("unit") or ""
+    uq = f.get("unit_quantity")
+    if uq and uq != 1:
+        unit = f"{uq:g} {unit}"
+    macro = f"{f.get('protein') or 0:.0f}p {f.get('calories') or 0:.0f}kcal"
+    return f"{indent}{f['name']}  [{q} × {unit}]  {macro}"
 
 
 def main():
     ap = argparse.ArgumentParser(prog="foodnomsctl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true")
-    # --json is accepted before OR after the subcommand: `foodnomsctl --json day`
-    # and `foodnomsctl day --json` both being natural is worth a shared parent
-    # parser, since the second form is what everyone reaches for first.
     jsonopt = argparse.ArgumentParser(add_help=False)
     jsonopt.add_argument("--json", action="store_true")
-    sub = ap.add_subparsers(dest="cmd", required=True, parser_class=lambda **kw: argparse.ArgumentParser(parents=[jsonopt], **kw))
-    c = sub.add_parser("catalog"); c.add_argument("--min-count", type=int, default=1); c.add_argument("--since")
+    sub = ap.add_subparsers(
+        dest="cmd", required=True,
+        parser_class=lambda **kw: argparse.ArgumentParser(parents=[jsonopt], **kw))
+
+    c = sub.add_parser("catalog"); c.add_argument("--min-count", type=int, default=1)
+    c.add_argument("--since")
     s = sub.add_parser("search"); s.add_argument("term")
     r = sub.add_parser("resolve"); r.add_argument("term")
     d = sub.add_parser("day"); d.add_argument("when", nargs="?", default=date.today().isoformat())
@@ -251,34 +353,34 @@ def main():
     rm = sub.add_parser("resolve-meal"); rm.add_argument("name")
     sub.add_parser("doctor")
 
-    # Writes. Every one of these is an App Intent call through the bridge.
     lg = sub.add_parser("log", help="log a food by name with macros")
     lg.add_argument("name")
     for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
                        ("--carbs", "carbs"), ("--fat", "fat"), ("--fiber", "fiber"),
                        ("--sugars", "sugars"), ("--sodium", "sodium")):
         lg.add_argument(flag, dest=dest, type=float)
-    lw = sub.add_parser("log-weight", help="log a body weight entry")
-    lw.add_argument("weight", type=float)
     cf = sub.add_parser("create-food", help="create a food in the library")
     cf.add_argument("name")
-    cf.add_argument("--brand"); cf.add_argument("--barcode"); cf.add_argument("--serving-size", dest="servingSize")
+    cf.add_argument("--brand"); cf.add_argument("--barcode")
+    cf.add_argument("--serving-size", dest="servingSize")
     for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
                        ("--carbs", "carbs"), ("--fat", "fat")):
         cf.add_argument(flag, dest=dest, type=float)
-    ds = sub.add_parser("db-search", help="search FoodNoms' online database, not the local log")
-    ds.add_argument("query")
-    ak = sub.add_parser("ask", help="ask FoodNoms AI")
-    ak.add_argument("query")
-    sub.add_parser("goal", help="today's goals")
+    sub.add_parser("goal", help="today's goal")
+
     a = ap.parse_args()
     if a.cmd == "doctor":
         sys.exit(doctor())
 
-    WRITE = {"log", "log-weight", "create-food", "db-search", "ask", "goal"}
-    if a.cmd in WRITE:
+    if a.cmd in ("log", "create-food", "goal"):
         fields = {k: v for k, v in vars(a).items() if k not in ("cmd", "json")}
         out = call_bridge(a.cmd, **fields)
+        if out is None:
+            # The intent wrote and then did not hand control back. Say so rather
+            # than reporting a failure that did not happen.
+            print(f"{a.cmd}: submitted; the intent did not return. "
+                  "Verify with `foodnomsctl day`.", file=sys.stderr)
+            return
         print(json.dumps({"command": a.cmd, "result": out}, indent=2) if a.json else out)
         return
 
@@ -286,22 +388,26 @@ def main():
 
     if a.cmd == "catalog":
         res = catalog(con, a.min_count, a.since)
-        if a.json: print(json.dumps(res, indent=2)); return
+        if a.json:
+            print(json.dumps(res, indent=2)); return
         for f in res:
             print(f"{f['count']:>4}  {fmt_food(f)}")
     elif a.cmd in ("search", "resolve"):
         res = search(con, a.term)
         if a.cmd == "resolve":
-            if not res: sys.exit(f"no FoodNoms food matches: {a.term}")
+            if not res:
+                sys.exit(f"no FoodNoms food matches: {a.term}")
             res = res[:1]
-        if a.json: print(json.dumps(res, indent=2)); return
+        if a.json:
+            print(json.dumps(res, indent=2)); return
         for f in res:
             print(f"{f['count']:>4}  {fmt_food(f)}")
-            print(f"      {f['service']} {f['service_id']}"
+            print(f"      {f['food_id']}"
                   + (f"  barcode {f['barcode']}" if f.get("barcode") else ""))
     elif a.cmd == "day":
         res = day(con, a.when)
-        if a.json: print(json.dumps(res, indent=2)); return
+        if a.json:
+            print(json.dumps(res, indent=2)); return
         t = res["totals"]
         print(f"{res['date']}  —  {t['calories']:.0f} kcal · {t['protein']:.0f}g protein "
               f"· {t['carbs']:.0f}g carbs · {t['fat']:.0f}g fat")
@@ -313,11 +419,13 @@ def main():
             sys.exit(f"no saved FoodNoms meal matches: {a.name}")
         exact = [mm for mm in res if mm["name"].lower() == a.name.lower()]
         res = (exact or res)[:1]
-        if a.json: print(json.dumps(res[0], indent=2)); return
+        if a.json:
+            print(json.dumps(res[0], indent=2)); return
         print(f"{res[0]['name']}  {res[0]['meal_id']}")
     elif a.cmd == "meals":
         res = meals(con, a.name)
-        if a.json: print(json.dumps(res, indent=2)); return
+        if a.json:
+            print(json.dumps(res, indent=2)); return
         for mm in res:
             print(f"{mm['name']}  ({len(mm['items'])} items)  {mm['meal_id'] or ''}")
             for it in mm["items"]:

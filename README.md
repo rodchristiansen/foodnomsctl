@@ -18,11 +18,20 @@ brand you are actually buying — is recoverable without any API, any account, a
 
 ```text
 foodnomsctl
-  reads:  ~/Library/Group Containers/group.com.algebraiclabs.foodnoms/FoodNoms.sqlite
-          (snapshotted per invocation, opened read-only)
+  reads:  ~/Library/Containers/<uuid>/Data/Documents/db.db
+          (discovered, snapshotted per invocation, opened read-only)
   writes: FoodNomsCTL Bridge.shortcut -> FoodNoms App Intents
   never:  the store itself
 ```
+
+**The store has to be discovered, never hardcoded.** FoodNoms has moved it twice
+and both earlier locations are still on disk, still populated, and both look
+plausible: a Core Data store in the app group container that stops in 2022, and a
+GRDB copy beside it that stops in 2025. The live one is in the app's sandbox
+container, whose directory name is a random UUID that differs per machine, so
+`foodnomsctl` matches it by reading each container's identity plist. Point at
+either abandoned store and every command answers confidently with data years
+stale — `doctor` names the live store and lists the ones it ignored.
 
 Three deliberate constraints:
 
@@ -36,8 +45,8 @@ Three deliberate constraints:
 - **Snapshot before read.** The store is copied — with its `-wal` and `-shm` sidecars — to a
   temporary path before every query, so a running FoodNoms.app never contends on the write-ahead
   log. Reads are consistent and the app never notices.
-- **The schema is not a contract.** These are Core Data internals, not a published API. A
-  FoodNoms model migration can move them. `foodnomsctl doctor` tells you immediately when that
+- **The schema is not a contract.** These are GRDB internals, not a published API, and FoodNoms
+  has already migrated once from Core Data. `foodnomsctl doctor` tells you immediately when that
   happens instead of returning quietly wrong answers.
 
 ## Quick Start

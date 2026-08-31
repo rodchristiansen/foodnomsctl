@@ -53,16 +53,37 @@ def action(ident, params):
     return {"WFWorkflowActionIdentifier": ident, "WFWorkflowActionParameters": params}
 
 
-def var(out_uuid, name, coerce=None):
-    """A reference to an earlier action's output."""
-    value = {"OutputName": name, "OutputUUID": out_uuid, "Type": "ActionOutput"}
-    if coerce:
-        value["Aggrandizements"] = [
-            {"Type": "WFCoercionVariableAggrandizement", "CoercionItemClass": coerce}]
+# Shortcuts has three different serializations for "the output of an earlier
+# action", and using the wrong one renders as a red "Unknown Variable" rather
+# than failing the import. A plain WFInput takes the attachment directly; a
+# conditional's WFInput wants it wrapped in a Variable; a text field wants it as
+# an attachment positioned in a string.
+
+def output_ref(out_uuid, name):
+    """Direct form — what a normal action's WFInput expects."""
     return {"WFSerializationType": "WFTextTokenAttachment",
-            "Value": {"Type": "Variable",
-                      "Variable": {"WFSerializationType": "WFTextTokenAttachment",
-                                   "Value": value}}}
+            "Value": {"OutputName": name, "OutputUUID": out_uuid,
+                      "Type": "ActionOutput"}}
+
+
+def condition_ref(out_uuid, name):
+    """What a conditional's WFInput expects — and it is its own shape.
+
+    Two things are load-bearing and neither errors on import. The Variable
+    wrapper sits at the top level with no WFSerializationType above it — wrap it
+    like a normal attachment and the If renders bare, with no input at all. And
+    a generic output such as "Dictionary Value" needs the string coercion, or
+    the If renders its input but leaves the comparison value empty; a text-typed
+    output would not need it, which is why a working example without one is
+    misleading.
+    """
+    return {"Type": "Variable",
+            "Variable": {"WFSerializationType": "WFTextTokenAttachment",
+                         "Value": {"Aggrandizements": [
+                             {"CoercionItemClass": "WFStringContentItem",
+                              "Type": "WFCoercionVariableAggrandizement"}],
+                             "OutputName": name, "OutputUUID": out_uuid,
+                             "Type": "ActionOutput"}}}
 
 
 def var_token(out_uuid, name):
@@ -79,8 +100,36 @@ def shortcut_input():
             "Value": {"Type": "ExtensionInput"}}
 
 
-def descriptor(bundle, intent):
-    return {"AppIntentIdentifier": intent, "BundleIdentifier": bundle, "Name": "Foodnoms"}
+def descriptor(bundle, intent, team):
+    d = {"AppIntentIdentifier": intent, "BundleIdentifier": bundle, "Name": "Foodnoms"}
+    if team:
+        d["TeamIdentifier"] = team
+    return d
+
+
+APP_INTENTS_METADATA = ("/Applications/FoodNoms.app/Contents/Resources"
+                       "/Metadata.appintents/extract.actionsdata")
+
+
+def required_params(intent):
+    """What the installed app says this intent cannot run without.
+
+    Shortcuts validates every action in a workflow before running any of them,
+    so one action missing a required parameter makes the whole bridge fail —
+    including commands that are themselves complete. The failure surfaces at run
+    time as "Please choose a value for each parameter in this action", with no
+    indication of which action is at fault, so it is worth catching at build.
+    """
+    import json
+    try:
+        with open(APP_INTENTS_METADATA) as fh:
+            meta = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    spec = meta.get("actions", {}).get(intent)
+    if not spec:
+        return None
+    return [p["name"] for p in spec.get("parameters", []) if not p.get("isOptional")]
 
 
 def check_commands(commands):
@@ -92,6 +141,17 @@ def check_commands(commands):
         if name in seen:
             sys.exit(f"duplicate command {name!r} in manifest")
         seen[name] = True
+
+        req = required_params(c["intent"])
+        if req is None:
+            continue
+        supplied = set(c.get("fixed") or {}) | set(c.get("params") or {})
+        missing = [r for r in req if r not in supplied]
+        if missing:
+            sys.exit(f"{c['intent']} ({name}): required parameter(s) not supplied: "
+                     f"{', '.join(missing)}. Add them to intents.yaml under `fixed` "
+                     "or `params`, or drop the command — an entity-typed one "
+                     "(mealType, foodMeasure) cannot be supplied at all.")
 
 
 def build(manifest):
@@ -111,12 +171,15 @@ def build(manifest):
         "is CloudKit-mirrored, so a row inserted behind the app never syncs.\n\n"
         f"Commands: {names}")})]
 
+    DICT_OUT, VALUE_OUT = "Dictionary", "Dictionary Value"
+
     dict_uuid, cmd_uuid = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
     acts.append(action("is.workflow.actions.detect.dictionary", {
-        "UUID": dict_uuid, "CustomOutputName": "Request", "WFInput": shortcut_input()}))
+        "UUID": dict_uuid, "WFInput": shortcut_input()}))
     acts.append(action("is.workflow.actions.getvalueforkey", {
-        "UUID": cmd_uuid, "CustomOutputName": "Command",
-        "WFInput": var(dict_uuid, "Request"), "WFDictionaryKey": "command"}))
+        "UUID": cmd_uuid, "WFDictionaryKey": "command",
+        "WFGetDictionaryValueType": "Value",
+        "WFInput": output_ref(dict_uuid, DICT_OUT)}))
 
     for spec in commands:
         group = str(uuid.uuid4()).upper()
@@ -124,31 +187,25 @@ def build(manifest):
             "GroupingIdentifier": group, "UUID": str(uuid.uuid4()).upper(),
             "WFControlFlowMode": FLOW_OPEN, "WFCondition": COND_IS,
             "WFConditionalActionString": spec["command"],
-            "WFInput": var(cmd_uuid, "Command", coerce="WFStringContentItem")}))
+            "WFInput": condition_ref(cmd_uuid, VALUE_OUT)}))
 
         params = dict(spec.get("fixed") or {})
         for key in (spec.get("params") or {}):
             pu = str(uuid.uuid4()).upper()
             acts.append(action("is.workflow.actions.getvalueforkey", {
-                "UUID": pu, "CustomOutputName": key,
-                "WFInput": var(dict_uuid, "Request"), "WFDictionaryKey": key}))
-            params[key] = var_token(pu, key)
+                "UUID": pu, "WFDictionaryKey": key,
+                "WFGetDictionaryValueType": "Value",
+                "WFInput": output_ref(dict_uuid, DICT_OUT)}))
+            params[key] = var_token(pu, VALUE_OUT)
 
-        result = str(uuid.uuid4()).upper()
-        params["UUID"] = result
-        params["AppIntentDescriptor"] = descriptor(bundle, spec["intent"])
+        params["UUID"] = str(uuid.uuid4()).upper()
+        params["AppIntentDescriptor"] = descriptor(bundle, spec["intent"],
+                                                   manifest.get("team"))
         acts.append(action(f"{bundle}.{spec['intent']}", params))
 
-        acts.append(action("is.workflow.actions.setvariable", {
-            "WFVariableName": "Result", "WFInput": var(result, spec["intent"])}))
         acts.append(action("is.workflow.actions.conditional", {
             "GroupingIdentifier": group, "UUID": str(uuid.uuid4()).upper(),
             "WFControlFlowMode": FLOW_CLOSE}))
-
-    acts.append(action("is.workflow.actions.getvariable", {
-        "WFVariable": {"WFSerializationType": "WFTextTokenAttachment",
-                       "Value": {"Type": "Variable",
-                                 "VariableName": "Result"}}}))
 
     return {
         "WFWorkflowActions": acts,
