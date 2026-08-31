@@ -137,7 +137,7 @@ def measure_of(row):
 
 ENTRY_COLS = """
   entryID, name, brandOwner, barcode, foodID, baseUnit, baseAmount, measure,
-  quantity, nutrients, calories, date, mealTypeID
+  measures, quantity, nutrients, calories, date, mealTypeID
 """
 
 
@@ -153,6 +153,18 @@ def as_food(row):
     d = {"name": row["name"], "brand": row["brandOwner"], "barcode": row["barcode"],
          "food_id": row["foodID"], "entry_id": as_uuid(row["entryID"]),
          "unit": unit, "unit_quantity": value, "quantity": row["quantity"]}
+    # The measure dict itself, not just its unit and size: FoodNoms' Log intent
+    # takes a measure as a JSON document that is exactly this, so anything
+    # generating an action needs the whole thing. `measures` is every portion the
+    # food offers, which is how a recipe asks for "in fl oz" rather than "in cups".
+    try:
+        d["measure"] = json.loads(row["measure"] or "{}") or None
+    except (ValueError, TypeError):
+        d["measure"] = None
+    try:
+        d["measures"] = json.loads(row["measures"] or "[]") or []
+    except (ValueError, TypeError):
+        d["measures"] = []
     d.update(nutrients(row))
     return d
 
