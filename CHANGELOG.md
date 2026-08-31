@@ -50,3 +50,7 @@ Adds the write path. Reads still go straight to SQLite; nothing ever writes the 
   the parameters it declares as required. Also records that `SearchFoodLibraryIntent` opens a
   picker despite claiming not to, that `quantity` does nothing without a `foodMeasure`, and how
   to read an entity shape back out of `Shortcuts.sqlite` instead of guessing it.
+- `type: drink` is accepted only for FoodNoms' own drink entries — water logs, a milk sent that
+  way fails with "An unknown error occurred" and logs fine as `type: food`.
+- Test one food per throwaway Shortcut. A Shortcut stops at its first failing action, so running
+  a menu-driven one finds only the first bad food, behind prompts `shortcuts run` cannot answer.

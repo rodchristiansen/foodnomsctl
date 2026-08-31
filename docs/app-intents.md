@@ -73,6 +73,30 @@ food. That default is usually the right answer for a recipe-driven Shortcut, but
 amounts come from FoodNoms' history rather than from the recipe. The `MeasureEntity` shape is
 still unknown.
 
+## `type: drink` is narrower than it looks
+
+`LogIntent`'s `type` enum offers `drink`, and the obvious reading — that anything you drink is
+a drink — is wrong. FoodNoms accepts it only for entries its own drink tracking recognises.
+Water logs correctly; almond, oat and macadamia milk all fail with "An unknown error occurred.
+Please submit a bug report to support@foodnoms.com", and log fine the moment they are sent as
+`type: food` instead.
+
+Nothing distinguishes the two cases in the metadata or in the store, so the only way to know is
+to log each one and look.
+
+## Prove every food, not the Shortcut
+
+A generated Shortcut can import cleanly, render cleanly, pass validation, and still fail on one
+ingredient. Worse, a Shortcut stops at its first failing action, so running the real one finds
+only the first bad food — and in a menu-driven Shortcut the failures sit behind prompts that
+`shortcuts run` cannot answer.
+
+Test each food in its own single-action Shortcut instead. Thirty-three options took thirty-three
+throwaway Shortcuts and about five minutes, and turned "a few errors somewhere" into three named
+foods with one shared cause. `bin/foodnoms-verify` in the engine repo automates exactly this.
+
+It logs a real entry per option, so clean the day up afterwards.
+
 ## Intents that are not headless
 
 The metadata's `openAppWhenRun: false` does not mean an intent runs without UI.
@@ -107,8 +131,9 @@ write to it, since it is CloudKit-mirrored.
 ## Installing and deleting
 
 `open` on a `.shortcut` signed `--mode anyone` installs it with no dialog — but only when no
-Shortcuts **editor window** is open, which silently swallows the import. Close the editor
-first and verify with `shortcuts list` rather than assuming.
+Shortcuts **editor window** is open, which silently swallows the import, and only while the
+session is unlocked. Close the editor, unlock the Mac, and verify with `shortcuts list` rather
+than assuming.
 
 Installing never replaces: a Shortcut already in the library under that name stays, and you
 get a second copy. Deleting is not scriptable — see [issue 001](issues/001-delete-does-not-bind-a-runtime-entity.md).
