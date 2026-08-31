@@ -54,3 +54,6 @@ Adds the write path. Reads still go straight to SQLite; nothing ever writes the 
   way fails with "An unknown error occurred" and logs fine as `type: food`.
 - Test one food per throwaway Shortcut. A Shortcut stops at its first failing action, so running
   a menu-driven one finds only the first bad food, behind prompts `shortcuts run` cannot answer.
+- `search` and `resolve` report each food's `measure` and full `measures` list, which is what a
+  generator needs to write a `foodMeasure` — the intent's measure identifier is that dictionary
+  wrapped in a `value` key.

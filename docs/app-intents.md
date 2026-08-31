@@ -67,11 +67,30 @@ failed, while omitting it worked first time.
 
 ## Quantity needs a measure
 
-`quantity` alone does nothing, as a string or as a number: it only takes effect alongside a
-`foodMeasure` entity, and with neither set the intent logs the portion last used for that
-food. That default is usually the right answer for a recipe-driven Shortcut, but it means
-amounts come from FoodNoms' history rather than from the recipe. The `MeasureEntity` shape is
-still unknown.
+`quantity` alone does nothing, as a string or as a number. It counts *measures*, so without a
+`foodMeasure` — `drinkMeasure` when `type` is `drink` — the intent quietly ignores it and logs
+the portion last used for that food. The three travel together:
+
+```json
+"quantity": "32",
+"useLastPortion": false,
+"drinkMeasure": {
+  "title": {"key": "fl oz"},
+  "subtitle": {"key": "fl oz"},
+  "identifier": "{\"value\":{\"value\":29.603152569971,\"traits\":0,\"descriptionText\":\"fl oz\",\"unit\":\"gram\",\"descriptionQuantity\":1}}"
+}
+```
+
+The identifier is the store's own `measure` dictionary wrapped in a `value` key — byte for byte
+what `foodEntryRecord.measure` holds and what `foodnomsctl resolve` now reports, alongside
+`measures`, every portion the food offers. So a measure is never invented, only selected.
+
+Two shapes are worth knowing. A base unit is a measure of size 1 —
+`{"traits":0,"unit":"gram","value":1}` — so `quantity` counts grams directly; that form appears
+in the store for foods logged by weight. A named portion carries `descriptionText` and the size
+of one of them in the base unit, which is how `fl oz` is 29.603152569971 grams of water. A food
+whose own portions are only in cups can still be logged in fluid ounces by scaling its base
+unit: 29.5735295625 for millilitres.
 
 ## `type: drink` is narrower than it looks
 
