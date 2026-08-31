@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""foodnomsctl — the FoodNoms CLI for macOS and AI agents.
+
+FoodNoms keeps a CloudKit-mirrored Core Data store in its app group container.
+Every logged entry carries the food's service identifiers, barcode, unit and
+full nutrition, which makes the log itself the library: anything ever scanned
+or logged is queryable here, offline, without opening the app.
+
+Read-only by design. The store is snapshotted before every read so a running
+FoodNoms.app never contends on the WAL, and nothing is ever written back.
+
+  foodnomsctl catalog [--min-count N] [--since YYYY-MM-DD]
+  foodnomsctl search <term>
+  foodnomsctl resolve <term|barcode:NNN|id:SERVICEID>
+  foodnomsctl day [YYYY-MM-DD]
+  foodnomsctl meals [name]
+  foodnomsctl resolve-meal <name>
+  foodnomsctl doctor
+
+--json on any subcommand.
+"""
+import argparse, json, os, shutil, sqlite3, sys, tempfile, uuid
+from datetime import datetime, date, timedelta
+
+STORE = os.path.expanduser(
+    "~/Library/Group Containers/group.com.algebraiclabs.foodnoms/FoodNoms.sqlite")
+APPLE_EPOCH = 978307200
+
+
+def connect():
+    if not os.path.exists(STORE):
+        sys.exit(f"FoodNoms store not found at {STORE}")
+    tmp = tempfile.mkdtemp(prefix="foodnoms.")
+    dst = os.path.join(tmp, "FoodNoms.sqlite")
+    shutil.copy2(STORE, dst)
+    for ext in ("-wal", "-shm"):
+        if os.path.exists(STORE + ext):
+            shutil.copy2(STORE + ext, dst + ext)
+    con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def ts(v):
+    return datetime.fromtimestamp(v + APPLE_EPOCH).isoformat(" ", "seconds") if v else None
+
+
+FOOD_COLS = """
+  ZNAME name, ZSERVICE service, ZSERVICEID service_id, ZBARCODE barcode,
+  ZUNIT unit, ZUNITQUANTITY unit_quantity, ZQUANTITY quantity,
+  ZHOUSEHOLDSERVINGFULLTEXT household, ZSERVINGSIZE serving_size,
+  ZSERVINGSIZEUNIT serving_size_unit,
+  ZCALORIES calories, ZPROTEIN protein, ZCARBS carbs, ZFAT fat,
+  ZFIBER fiber, ZSUGARS sugars, ZSODIUM sodium, ZDATE date
+"""
+
+
+def catalog(con, min_count=1, since=None):
+    """One row per distinct food, taking the most recently logged entry as
+    canonical — units and serving sizes drift as brands change, and the most
+    recent log is by definition the product currently being bought."""
+    where, params = "WHERE ZSERVICEID IS NOT NULL", []
+    if since:
+        where += " AND ZDATE >= ?"
+        params.append(
+            (datetime.strptime(since, "%Y-%m-%d") - datetime(1970, 1, 1)).total_seconds()
+            - APPLE_EPOCH)
+    rows = con.execute(f"""
+      SELECT {FOOD_COLS}, cnt, last_logged FROM (
+        SELECT *, COUNT(*) OVER (PARTITION BY ZSERVICEID) cnt,
+               MAX(ZDATE) OVER (PARTITION BY ZSERVICEID) last_logged,
+               ROW_NUMBER() OVER (PARTITION BY ZSERVICEID ORDER BY ZDATE DESC) rn
+        FROM ZFOODENTRY {where})
+      WHERE rn = 1 AND cnt >= ?
+      ORDER BY cnt DESC, name
+    """, params + [min_count]).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["last_logged"] = ts(d.pop("last_logged"))
+        d.pop("date", None)
+        d["count"] = d.pop("cnt")
+        out.append(d)
+    return out
+
+
+def search(con, term):
+    t = term.lower()
+    if t.startswith("barcode:"):
+        key, val = "barcode", t.split(":", 1)[1]
+    elif t.startswith("id:"):
+        key, val = "service_id", term.split(":", 1)[1]
+    else:
+        key, val = None, t
+    hits = []
+    for f in catalog(con):
+        if key:
+            if (f.get(key) or "") == val:
+                hits.append(f)
+        elif val in (f["name"] or "").lower():
+            hits.append(f)
+    return hits
+
+
+def day(con, when):
+    lo = (datetime.strptime(when, "%Y-%m-%d") - datetime(1970, 1, 1)).total_seconds() - APPLE_EPOCH
+    rows = con.execute(f"""
+      SELECT {FOOD_COLS}, ZMEAL meal FROM ZFOODENTRY
+      WHERE ZDATE >= ? AND ZDATE < ? AND ZMEALENTITY IS NULL AND ZRECIPEENTITY IS NULL
+      ORDER BY ZDATE
+    """, (lo, lo + 86400)).fetchall()
+    entries = []
+    for r in rows:
+        d = dict(r)
+        d["date"] = ts(d["date"])
+        entries.append(d)
+    totals = {k: round(sum(e[k] or 0 for e in entries), 1)
+              for k in ("calories", "protein", "carbs", "fat", "fiber", "sugars", "sodium")}
+    return {"date": when, "totals": totals, "entries": entries}
+
+
+def meals(con, name=None):
+    """Saved FoodNoms Meals. ZMEALID is the raw 16 bytes of the UUID that a
+    Shortcut's LogMealIntent references, so a meal is addressable by name."""
+    out = []
+    for m in con.execute("SELECT Z_PK, ZNAME, ZMEALID FROM ZMEAL ORDER BY ZNAME"):
+        if name and name.lower() not in (m["ZNAME"] or "").lower():
+            continue
+        items = [dict(r) for r in con.execute(
+            f"SELECT {FOOD_COLS} FROM ZFOODENTRY WHERE ZMEALENTITY = ? ORDER BY ZMEALSORTINDEX",
+            (m["Z_PK"],))]
+        for it in items:
+            it.pop("date", None)
+        blob = m["ZMEALID"]
+        meal_id = str(uuid.UUID(bytes=bytes(blob))).upper() if blob and len(blob) == 16 else None
+        out.append({"name": m["ZNAME"], "meal_id": meal_id, "items": items})
+    return out
+
+
+def fmt_food(f, indent=""):
+    q = f"{f['quantity']:g}" if f.get("quantity") is not None else "?"
+    unit = f.get("household") or f.get("unit") or ""
+    uq = f.get("unit_quantity")
+    if uq and uq != 1:
+        unit = f"{uq:g} {unit}"
+    macro = f"{f['protein'] or 0:.0f}p {f['calories'] or 0:.0f}kcal"
+    return f"{indent}{f['name']}  [{q} × {unit}]  {macro}"
+
+
+def doctor():
+    """What a user needs to see when the CLI cannot find their food."""
+    ok = True
+    print("foodnomsctl doctor\n")
+    print(f"  store path   {STORE}")
+    if not os.path.exists(STORE):
+        print("  [FAIL] store not found — is FoodNoms installed and has it synced once?")
+        return 1
+    size = os.path.getsize(STORE)
+    print(f"  [OK]   store present ({size/1_048_576:.1f} MB)")
+    try:
+        con = connect()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"  [FAIL] cannot open store: {e}")
+        print("         The app group container is TCC-protected. Grant Full Disk")
+        print("         Access to the terminal or agent host running foodnomsctl.")
+        return 1
+    try:
+        entries = con.execute("SELECT COUNT(*) FROM ZFOODENTRY").fetchone()[0]
+        foods = len(catalog(con))
+        saved = len(meals(con))
+    except sqlite3.Error as e:
+        print(f"  [FAIL] schema not as expected: {e}")
+        print("         FoodNoms may have migrated its Core Data model.")
+        return 1
+    print(f"  [OK]   {entries} logged entries")
+    print(f"  [OK]   {foods} distinct foods")
+    print(f"  [OK]   {saved} saved meals")
+    return 0 if ok else 1
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="foodnomsctl", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("catalog"); c.add_argument("--min-count", type=int, default=1); c.add_argument("--since")
+    s = sub.add_parser("search"); s.add_argument("term")
+    r = sub.add_parser("resolve"); r.add_argument("term")
+    d = sub.add_parser("day"); d.add_argument("when", nargs="?", default=date.today().isoformat())
+    m = sub.add_parser("meals"); m.add_argument("name", nargs="?")
+    rm = sub.add_parser("resolve-meal"); rm.add_argument("name")
+    sub.add_parser("doctor")
+    a = ap.parse_args()
+    if a.cmd == "doctor":
+        sys.exit(doctor())
+    con = connect()
+
+    if a.cmd == "catalog":
+        res = catalog(con, a.min_count, a.since)
+        if a.json: print(json.dumps(res, indent=2)); return
+        for f in res:
+            print(f"{f['count']:>4}  {fmt_food(f)}")
+    elif a.cmd in ("search", "resolve"):
+        res = search(con, a.term)
+        if a.cmd == "resolve":
+            if not res: sys.exit(f"no FoodNoms food matches: {a.term}")
+            res = res[:1]
+        if a.json: print(json.dumps(res, indent=2)); return
+        for f in res:
+            print(f"{f['count']:>4}  {fmt_food(f)}")
+            print(f"      {f['service']} {f['service_id']}"
+                  + (f"  barcode {f['barcode']}" if f.get("barcode") else ""))
+    elif a.cmd == "day":
+        res = day(con, a.when)
+        if a.json: print(json.dumps(res, indent=2)); return
+        t = res["totals"]
+        print(f"{res['date']}  —  {t['calories']:.0f} kcal · {t['protein']:.0f}g protein "
+              f"· {t['carbs']:.0f}g carbs · {t['fat']:.0f}g fat")
+        for e in res["entries"]:
+            print(fmt_food(e, "  "))
+    elif a.cmd == "resolve-meal":
+        res = [mm for mm in meals(con, a.name) if mm["meal_id"]]
+        if not res:
+            sys.exit(f"no saved FoodNoms meal matches: {a.name}")
+        exact = [mm for mm in res if mm["name"].lower() == a.name.lower()]
+        res = (exact or res)[:1]
+        if a.json: print(json.dumps(res[0], indent=2)); return
+        print(f"{res[0]['name']}  {res[0]['meal_id']}")
+    elif a.cmd == "meals":
+        res = meals(con, a.name)
+        if a.json: print(json.dumps(res, indent=2)); return
+        for mm in res:
+            print(f"{mm['name']}  ({len(mm['items'])} items)  {mm['meal_id'] or ''}")
+            for it in mm["items"]:
+                print(fmt_food(it, "    "))
+
+
+if __name__ == "__main__":
+    main()
