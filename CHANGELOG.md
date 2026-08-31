@@ -34,7 +34,9 @@ Adds the write path. Reads still go straight to SQLite; nothing ever writes the 
   too large. The factor now comes from the already-scaled `calories` column.
 - Correct days. Filtering moved from the UTC `date` to the local-day `day` column; a date window
   took yesterday evening and dropped this evening.
-- `delete` — remove a logged entry by entry id or by name within a day.
-- Entity parameters are bindable after all: an intent takes `{identifier, displayString}`, so
-  entity-typed arguments no longer force a picker.
+- `delete` — present but **not working**. An entity parameter binds from a literal known at
+  build time, not from a value arriving at run time; the intent accepts the request and does
+  nothing. The command verifies against the store and fails loudly rather than reporting a
+  success that did not happen. The fix is to have the shortcut find the entity itself rather
+  than be handed an identifier.
 - `--json` before the subcommand is no longer silently un-set by the subparser's own default.

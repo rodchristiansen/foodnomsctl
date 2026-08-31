@@ -77,8 +77,19 @@ commands:
     summary: Delete a logged entry, by its entry id
     fixed:
       deleteWithoutConfirmation: true
-    # foodEntries is an entity array. Binding it needs the identifier AND the
-    # text to display, each pulled from the request dictionary.
+    # KNOWN BROKEN. foodEntries is an entity array, and an entity binds fine
+    # from a literal known at build time — that is how the smoothie generator
+    # pins a food. It does NOT bind from a value arriving at run time: the
+    # intent accepts the request, returns nothing, and deletes nothing, whether
+    # the identifier is the entry UUID in either case or its row id.
+    #
+    # The fix is to stop passing an identifier at all and let Shortcuts produce
+    # the entity: GetFoodEntriesIntent for the day, filter it by name inside the
+    # shortcut, and hand DeleteLoggedFoodIntent the resulting entity array as a
+    # variable. Entity arrays do bind from another action's output.
+    #
+    # `foodnomsctl delete` reads the store back and fails loudly rather than
+    # reporting a success that did not happen.
     entities:
       foodEntries:
         identifier: entryID

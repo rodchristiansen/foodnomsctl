@@ -412,12 +412,14 @@ def main():
             entry, name = hits[0]["entry_id"], hits[0]["name"]
             for extra in hits[1:]:
                 call_bridge("delete", entryID=extra["entry_id"], entryName=extra["name"])
-        out = call_bridge("delete", entryID=entry, entryName=name)
-        if out is None:
-            print("delete: submitted; the intent did not return. "
-                  "Verify with `foodnomsctl day`.", file=sys.stderr)
-        else:
-            print(out or f"deleted {name}")
+        call_bridge("delete", entryID=entry, entryName=name)
+        # The intent returns nothing whether it deleted or silently declined, so
+        # the only honest confirmation is to read the store back.
+        still = [e for e in day(connect(), a.on)["entries"] if e["entry_id"] == entry]
+        if still:
+            sys.exit(f"delete: {name} is still in the log for {a.on}. "
+                     "The intent accepted the request without acting on it.")
+        print(f"deleted {name}")
         return
 
     if a.cmd in ("log", "create-food", "goal"):
