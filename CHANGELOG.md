@@ -11,3 +11,14 @@ FoodNoms library since 2026-08-30.
 - `meals` / `resolve-meal` — saved Meals and their `LogMealIntent` UUIDs
 - `doctor` — store presence, readability, counts, and a clear failure on schema drift
 - `--json` on every subcommand
+
+## 0.2.0 — 2026-08-30
+
+Adds the write path. Reads still go straight to SQLite; nothing ever writes the store.
+
+- `foodnomsctl-bridge` — generates the dispatcher Shortcut from `intents.yaml`, verifies every
+  conditional block closes and that no two commands collide, and signs it
+- `log`, `log-weight`, `create-food`, `db-search`, `ask`, `goal` — App Intent calls dispatched
+  through the bridge with `shortcuts run`
+- `doctor` now reports whether the bridge is installed
+- `--json` works after the subcommand as well as before

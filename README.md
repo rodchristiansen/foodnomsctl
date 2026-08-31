@@ -18,17 +18,21 @@ brand you are actually buying — is recoverable without any API, any account, a
 
 ```text
 foodnomsctl
-  reads: ~/Library/Group Containers/group.com.algebraiclabs.foodnoms/FoodNoms.sqlite
-         (snapshotted per invocation, opened read-only)
-  writes: nothing
+  reads:  ~/Library/Group Containers/group.com.algebraiclabs.foodnoms/FoodNoms.sqlite
+          (snapshotted per invocation, opened read-only)
+  writes: FoodNomsCTL Bridge.shortcut -> FoodNoms App Intents
+  never:  the store itself
 ```
 
 Three deliberate constraints:
 
-- **Read-only, always.** FoodNomsCTL never writes to the store, and has no `--force` that
-  changes this. FoodNoms owns its data and its CloudKit sync; a CLI mutating Core Data behind a
-  running app is how you corrupt a database and lose a year of logging. Writing is what
-  FoodNoms' own App Intents are for.
+- **Never writes the store.** Reads go straight to SQLite; every mutation goes through
+  FoodNoms' own App Intents. This is not caution for its own sake — the store is
+  CloudKit-mirrored (`NSPersistentCloudKitContainer`, and its `ANSCK*` bookkeeping tables are
+  right there beside the data). A row inserted behind the app's back gets no CKRecord, so it
+  never reaches your phone, and it can leave the export bookkeeping inconsistent with the object
+  graph. Same split as [RemCTL](https://github.com/viticci/remctl), which reads the Reminders
+  database directly and writes through EventKit.
 - **Snapshot before read.** The store is copied — with its `-wal` and `-shm` sidecars — to a
   temporary path before every query, so a running FoodNoms.app never contends on the write-ahead
   log. Reads are consistent and the app never notices.
@@ -103,7 +107,52 @@ foodnomsctl resolve-meal "Morning Smoothie"
 
 ### `doctor`
 
-Store path, size, entry counts, and a clear failure when the schema has moved.
+Store path, size, entry counts, whether the bridge Shortcut is installed, and a clear failure
+when the schema has moved.
+
+## Writing
+
+macOS has no command that invokes another app's App Intent directly, so writes go through one
+generated Shortcut. The CLI hands it a JSON request, it dispatches on the `command` key, and
+returns the intent's result.
+
+```bash
+./foodnomsctl-bridge --publish
+```
+
+That generates `FoodNomsCTL Bridge.xml` from [intents.yaml](intents.yaml), signs it, and opens
+it for import — importing is a tap you make once in Shortcuts. After that:
+
+```bash
+foodnomsctl log "Cold brew" --calories 15 --protein 1
+foodnomsctl log-weight 191.4
+foodnomsctl create-food "House Granola" --brand "Homemade" --calories 220 --protein 6
+foodnomsctl db-search "skyr"
+foodnomsctl ask "how much protein have I had today"
+foodnomsctl goal
+```
+
+One Shortcut rather than one per intent, because installing a suite of twelve is a chore and
+they drift apart. Generated rather than hand-built, because a dispatcher is N branches of
+hand-wired parameters — exactly the shape that rots. The branch set is data in `intents.yaml`;
+rebuilding re-emits all of it, checks that no two commands collide, and verifies every
+conditional block closes.
+
+Dispatch compares the command name for **exact equality**, never "contains". A contains-match
+dispatcher is how a branch for `log` also fires for `log-weight`.
+
+### Which intents are wrapped, and why so few
+
+FoodNoms ships 45 App Intents. Nine only open UI and do nothing headless. Most of the rest are
+reads that `foodnomsctl` already answers faster and in more detail from the store — wrapping
+`GetFoodEntriesIntent` would be strictly worse than `foodnomsctl day`. So the manifest carries
+the writes the store must never perform itself, plus the two reads the local store genuinely
+cannot answer: `db-search` hits FoodNoms' *online* database rather than your log, and `ask`
+reaches FoodNoms AI.
+
+Entity-typed parameters — `mealType`, `foodMeasure`, `favorite` — are not exposed. Shortcuts
+resolves an entity through picker UI with no headless equivalent. That is the ceiling of this
+approach, and the reason `log` takes a quick entry rather than a library reference.
 
 ## Why This Exists
 
@@ -129,7 +178,8 @@ number back to it. Structured `--json` on every command is the point, not a conv
 
 Stated plainly, because they are structural:
 
-- **Read-only.** Logging food is FoodNoms' job. Use its App Intents from Shortcuts.
+- **Writes need the bridge Shortcut imported once.** Reads work immediately; `doctor` tells you
+  whether the write path is installed.
 - **macOS only.** It reads a local file; there is no iOS equivalent and there cannot be one.
 - **Unofficial.** Not affiliated with or endorsed by Algebraic Labs. The schema is internal and
   may change without notice — `doctor` is how you find out.

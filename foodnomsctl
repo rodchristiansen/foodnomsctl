@@ -17,9 +17,18 @@ FoodNoms.app never contends on the WAL, and nothing is ever written back.
   foodnomsctl resolve-meal <name>
   foodnomsctl doctor
 
+Writes go through App Intents, never the store:
+
+  foodnomsctl log <name> [--calories N] [--protein N] [--carbs N] [--fat N]
+  foodnomsctl log-weight <lbs>
+  foodnomsctl create-food <name> [--brand B] [--barcode B] [--calories N] ...
+  foodnomsctl db-search <query>
+  foodnomsctl ask <question>
+  foodnomsctl goal
+
 --json on any subcommand.
 """
-import argparse, json, os, shutil, sqlite3, sys, tempfile, uuid
+import argparse, json, os, shutil, sqlite3, subprocess, sys, tempfile, uuid
 from datetime import datetime, date, timedelta
 
 STORE = os.path.expanduser(
@@ -147,6 +156,42 @@ def fmt_food(f, indent=""):
     return f"{indent}{f['name']}  [{q} × {unit}]  {macro}"
 
 
+BRIDGE = "FoodNomsCTL Bridge"
+
+
+def call_bridge(command, **params):
+    """Dispatch one App Intent through the bridge Shortcut.
+
+    macOS has no way to invoke another app's App Intent directly, so a Shortcut
+    is the only supported write path. `shortcuts run` takes the request as a
+    file and writes the result to another, so both ends are temp files.
+
+    Nothing here touches the FoodNoms store. It is CloudKit-mirrored: a row
+    written behind the app's back gets no CKRecord, never reaches the phone, and
+    can leave the export bookkeeping inconsistent with the object graph.
+    """
+    payload = {"command": command}
+    payload.update({k: v for k, v in params.items() if v is not None})
+    tmp = tempfile.mkdtemp(prefix="foodnomsctl.")
+    req, res = os.path.join(tmp, "request.json"), os.path.join(tmp, "result.txt")
+    try:
+        with open(req, "w") as fh:
+            json.dump(payload, fh)
+        r = subprocess.run(["shortcuts", "run", BRIDGE, "-i", req, "-o", res],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            err = (r.stderr or "").strip()
+            if "not find" in err.lower():
+                sys.exit(f"{err}\nInstall the bridge: ./foodnomsctl-bridge --publish")
+            sys.exit(err or f"shortcuts run failed ({r.returncode})")
+        if os.path.exists(res):
+            with open(res, encoding="utf-8", errors="replace") as fh:
+                return fh.read().strip()
+        return ""
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def doctor():
     """What a user needs to see when the CLI cannot find their food."""
     ok = True
@@ -177,6 +222,14 @@ def doctor():
     print(f"  [OK]   {entries} logged entries")
     print(f"  [OK]   {foods} distinct foods")
     print(f"  [OK]   {saved} saved meals")
+
+    installed = subprocess.run(["shortcuts", "list"], capture_output=True, text=True)
+    if BRIDGE in (installed.stdout or ""):
+        print(f"  [OK]   write path: \"{BRIDGE}\" installed")
+    else:
+        print(f"  [WARN] write path: \"{BRIDGE}\" not installed — reads work,")
+        print("         writes will fail. Build and import it with:")
+        print("           ./foodnomsctl-bridge --publish")
     return 0 if ok else 1
 
 
@@ -197,9 +250,38 @@ def main():
     m = sub.add_parser("meals"); m.add_argument("name", nargs="?")
     rm = sub.add_parser("resolve-meal"); rm.add_argument("name")
     sub.add_parser("doctor")
+
+    # Writes. Every one of these is an App Intent call through the bridge.
+    lg = sub.add_parser("log", help="log a food by name with macros")
+    lg.add_argument("name")
+    for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
+                       ("--carbs", "carbs"), ("--fat", "fat"), ("--fiber", "fiber"),
+                       ("--sugars", "sugars"), ("--sodium", "sodium")):
+        lg.add_argument(flag, dest=dest, type=float)
+    lw = sub.add_parser("log-weight", help="log a body weight entry")
+    lw.add_argument("weight", type=float)
+    cf = sub.add_parser("create-food", help="create a food in the library")
+    cf.add_argument("name")
+    cf.add_argument("--brand"); cf.add_argument("--barcode"); cf.add_argument("--serving-size", dest="servingSize")
+    for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
+                       ("--carbs", "carbs"), ("--fat", "fat")):
+        cf.add_argument(flag, dest=dest, type=float)
+    ds = sub.add_parser("db-search", help="search FoodNoms' online database, not the local log")
+    ds.add_argument("query")
+    ak = sub.add_parser("ask", help="ask FoodNoms AI")
+    ak.add_argument("query")
+    sub.add_parser("goal", help="today's goals")
     a = ap.parse_args()
     if a.cmd == "doctor":
         sys.exit(doctor())
+
+    WRITE = {"log", "log-weight", "create-food", "db-search", "ask", "goal"}
+    if a.cmd in WRITE:
+        fields = {k: v for k, v in vars(a).items() if k not in ("cmd", "json")}
+        out = call_bridge(a.cmd, **fields)
+        print(json.dumps({"command": a.cmd, "result": out}, indent=2) if a.json else out)
+        return
+
     con = connect()
 
     if a.cmd == "catalog":

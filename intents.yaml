@@ -1,0 +1,86 @@
+# Which FoodNoms App Intents the bridge Shortcut wraps.
+#
+# FoodNoms ships 45 intents. Nine only open UI and are useless headless. Of the
+# rest, most are reads that foodnomsctl already answers faster and in more
+# detail straight from the store — wrapping GetFoodEntriesIntent would be
+# strictly worse than `foodnomsctl day`. So this manifest is deliberately small:
+# the writes the local store must never perform itself, plus the two reads the
+# local store genuinely cannot answer because they reach FoodNoms' own online
+# database and its AI.
+#
+# `fixed` values are literals baked into the action at build time — required
+# enum parameters that have one sensible answer for scripted use. `params` are
+# bound at run time from the request dictionary the CLI passes in.
+#
+# Entity-typed parameters (mealType, foodMeasure, favorite…) are NOT exposed.
+# Shortcuts resolves an entity through its own picker UI, which has no headless
+# equivalent; binding one from text does not work. That is the honest ceiling of
+# this approach and the reason `log` takes a quick entry rather than a library
+# item reference.
+
+bundle: com.algebraiclabs.foodnoms
+shortcut_name: FoodNomsCTL Bridge
+
+commands:
+  - command: log
+    intent: LogQuickEntryIntent
+    summary: Log a food by name with macros
+    fixed:
+      dateTimePreference: dateAndTime
+      uncertainty: exact
+      requireMacros: true
+    params:
+      name: {type: text, required: true}
+      energyCalories: {type: number}
+      protein: {type: number}
+      carbs: {type: number}
+      fat: {type: number}
+      fiber: {type: number}
+      sugars: {type: number}
+      sodium: {type: number}
+
+  - command: log-weight
+    intent: LogWeightIntent
+    summary: Log a body weight entry
+    fixed:
+      dayOption: today
+    params:
+      weight: {type: number, required: true}
+
+  - command: create-food
+    intent: CreateFoodIntent
+    summary: Create a food in the library
+    fixed:
+      normalizationMode: perServing
+    params:
+      name: {type: text, required: true}
+      brand: {type: text}
+      barcode: {type: text}
+      servingSize: {type: text}
+      energyCalories: {type: number}
+      protein: {type: number}
+      carbs: {type: number}
+      fat: {type: number}
+
+  - command: db-search
+    intent: SearchFoodnomsDatabaseIntent
+    summary: Search FoodNoms' online food database, not the local log
+    fixed:
+      scope: all
+      limit: 10
+    params:
+      query: {type: text, required: true}
+
+  - command: ask
+    intent: AskFoodnomsAIIntent
+    summary: Ask FoodNoms AI a question
+    params:
+      query: {type: text, required: true}
+
+  - command: goal
+    intent: GetGoalIntent
+    summary: Read today's goal — the one read used to smoke-test the bridge
+    fixed:
+      scope: allGoals
+      dayOption: today
+    params: {}
