@@ -1,6 +1,6 @@
 # 001 — `delete` accepts the request and does nothing
 
-**Status:** open · **Opened:** 2026-08-30 · **Affects:** `foodnomsctl delete`, `DeleteLoggedFoodIntent`
+**Status:** fixed · **Opened:** 2026-08-30 · **Fixed:** 2026-09-03 · **Affects:** `foodnomsctl delete`, `DeleteLoggedFoodIntent`
 
 `foodnomsctl delete <entry-id|name>` reaches `DeleteLoggedFoodIntent` through the bridge
 Shortcut, the run exits 0, and the entry is still in the log.
@@ -39,6 +39,17 @@ This makes the `delete` branch structurally different from `log` and `create-foo
 one action each — the generator in `foodnomsctl-bridge` currently assumes one action per
 command and will need to grow multi-action branches.
 
-## Meanwhile
+## Fixed
 
-Deleting an entry is a swipe in FoodNoms. The CLI is read-and-append until this is fixed.
+Exactly as described above, plus one thing the plan did not anticipate: Shortcuts' filter
+actions cannot see an entity's properties, so the entries cannot be matched by name inside the
+shortcut. The branch selects by position instead — `GetFoodEntriesIntent` for the day, `Get
+Item from List` at an index taken from the request, then `DeleteLoggedFoodIntent`.
+
+The index is not a guess. `GetFoodEntriesIntent` leaves out water and drink entries, so its
+order is not the store's, and a position computed from SQL would delete the wrong food. The
+new `entries` command returns that same list as text, and the CLI resolves the name against it
+before passing a position — so the ordering is observed rather than modelled. A name the intent
+does not return is a stop, not a best guess, because deleting is permanent.
+
+Deleting several at once works from the back, since removing one shifts every later position.

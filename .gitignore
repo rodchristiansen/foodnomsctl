@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+
+# Bridges published under a scratch name to test a build before it takes over.
+FNCTL *.shortcut

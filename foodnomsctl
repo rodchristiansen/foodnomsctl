@@ -39,10 +39,13 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 BUNDLE = "com.algebraiclabs.foodnoms"
-BRIDGE = "FoodNomsCTL Bridge"
+# Importing a Shortcut does not replace a same-named one already in the library
+# — it is refused outright, so a rebuilt bridge cannot be installed over the old
+# one. Overriding the name is how a new build gets tested before it takes over.
+BRIDGE = os.environ.get("FOODNOMSCTL_BRIDGE", "FoodNomsCTL Bridge")
 
 # FoodNoms has moved its store twice. The Core Data one in the app group
 # container stops in 2022 and the group-container GRDB copy stops in 2025; both
@@ -304,13 +307,36 @@ def parse_when(text):
             "'YYYY-MM-DD HH:MM'.")
 
 
-def call_bridge(command, timeout=25, **params):
+def utc_to_local(stamp):
+    """A stored entry timestamp, as local wall-clock time.
+
+    `foodEntryRecord.date` is UTC; everything that writes back through an intent
+    is interpreted as local. Converting is the difference between an edit that
+    leaves an entry where it was and one that slides it across a day boundary.
+    """
+    txt = (stamp or "")[:19].replace("T", " ")
+    try:
+        naive = datetime.strptime(txt, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return txt
+    return (naive.replace(tzinfo=timezone.utc)
+            .astimezone()
+            .strftime("%Y-%m-%d %H:%M:%S"))
+
+
+def call_bridge(command, timeout=90, **params):
     """Dispatch one App Intent through the bridge Shortcut.
 
     macOS cannot invoke another app's App Intent directly, so a Shortcut is the
     only supported write path. Some FoodNoms intents complete the write and then
     do not return — the entry lands, `shortcuts run` simply never exits — so
     this bounds the wait rather than hanging the caller forever.
+
+    The bound has to be generous, because the timeout does not merely stop
+    waiting: it pkills `shortcuts run`, and a write still in flight dies with
+    it. At 25s that lost every log while reporting the ambiguous "the intent did
+    not return", which reads like the known does-not-return case and is instead
+    this tool killing its own write. A cold FoodNoms takes well over 30s.
     """
     payload = {"command": command}
     payload.update({k: v for k, v in params.items() if v is not None})
@@ -430,6 +456,23 @@ def main():
     dl.add_argument("target", help="entry id, or a name to match in a day's log")
     dl.add_argument("--on", default=date.today().isoformat(),
                     help="which day to search when matching by name (default today)")
+    ed = sub.add_parser("edit", help="correct a logged entry's macros or its day")
+    ed.add_argument("target", help="entry id, or a name to match in a day's log")
+    ed.add_argument("--on", default=date.today().isoformat(),
+                    help="which day the entry is currently on (default today)")
+    ed.add_argument("--to-date", dest="to_date", type=parse_when,
+                    help="move it to this day; omit to leave it where it is")
+    ed.add_argument("--scale", type=float,
+                    help="multiply its macros by this, for a portion that was "
+                         "not the one logged (0.5 for half of it)")
+    for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
+                       ("--carbs", "carbs"), ("--fat", "fat"), ("--fiber", "fiber"),
+                       ("--sugars", "sugars"), ("--sodium", "sodium")):
+        ed.add_argument(flag, dest=dest, type=float,
+                        help=argparse.SUPPRESS)
+    dl.add_argument("--all", action="store_true",
+                    help="delete every entry that matches, rather than refusing "
+                         "to guess between them")
 
     a = ap.parse_args()
     if a.cmd == "doctor":
@@ -437,29 +480,118 @@ def main():
 
     if a.cmd == "delete":
         con = connect()
-        target = a.target
-        if "-" in target and len(target) == 36:
-            entry, name = target.upper(), target
-        else:
-            hits = [e for e in day(con, a.on)["entries"]
-                    if target.lower() in (e["name"] or "").lower()]
-            if not hits:
-                sys.exit(f"no entry matching {target!r} in the log for {a.on}")
-            if len({h["entry_id"] for h in hits}) > 1:
-                print(f"{len(hits)} entries match {target!r} — deleting all:", file=sys.stderr)
-                for h in hits:
-                    print(f"  {h['name']}  {h['entry_id']}", file=sys.stderr)
-            entry, name = hits[0]["entry_id"], hits[0]["name"]
-            for extra in hits[1:]:
-                call_bridge("delete", entryID=extra["entry_id"], entryName=extra["name"])
-        call_bridge("delete", entryID=entry, entryName=name)
-        # The intent returns nothing whether it deleted or silently declined, so
-        # the only honest confirmation is to read the store back.
-        still = [e for e in day(connect(), a.on)["entries"] if e["entry_id"] == entry]
-        if still:
-            sys.exit(f"delete: {name} is still in the log for {a.on}. "
-                     "The intent accepted the request without acting on it.")
-        print(f"deleted {name}")
+        entries = day(con, a.on)["entries"]
+        hits = [e for e in entries
+                if a.target.upper() == (e["entry_id"] or "").upper()
+                or a.target.lower() in (e["name"] or "").lower()]
+        if not hits:
+            sys.exit(f"no entry matching {a.target!r} in the log for {a.on}")
+        if len(hits) > 1 and not a.all:
+            print(f"{len(hits)} entries match {a.target!r} in the log for {a.on}:",
+                  file=sys.stderr)
+            for h in hits:
+                print(f"  {h['name']}  {h['entry_id']}", file=sys.stderr)
+            sys.exit("refusing to guess — name the entry id, or pass --all")
+
+        # The bridge deletes by position in GetFoodEntriesIntent's own output,
+        # which is not this list: the intent leaves out water and drink entries,
+        # so an index taken from the store is off by however many of those came
+        # first. Ask the bridge for its list and resolve against that, rather
+        # than modelling a rule that is only inferred. Deleting is permanent, so
+        # a name that is not in the returned list is a stop, not a best guess.
+        when = f"{a.on} 12:00:00"
+        listed = call_bridge("entries", date=when)
+        if not listed:
+            sys.exit("delete: the bridge returned no entries for that day. "
+                     "Is the build installed? `foodnomsctl doctor`.")
+        names = [n for n in (listed or "").splitlines() if n.strip()]
+
+        # Deleting shifts every later position, so work from the back.
+        targets = []
+        for h in hits if a.all else hits[:1]:
+            matches = [i for i, n in enumerate(names) if n == h["name"]]
+            if not matches:
+                sys.exit(f"delete: {h['name']!r} is in the store for {a.on} but not "
+                         "in what the intent returns for that day, so there is no "
+                         "position to delete. Water and drink entries are the "
+                         "known case; delete it in FoodNoms.")
+            targets.append((matches.pop(0), h))
+        for idx, h in sorted(targets, reverse=True):
+            call_bridge("delete", date=when, index=idx + 1)
+            still = [e for e in day(connect(), a.on)["entries"]
+                     if e["entry_id"] == h["entry_id"]]
+            if still:
+                sys.exit(f"delete: {h['name']} is still in the log for {a.on}. "
+                         "The intent accepted the request without acting on it.")
+            print(f"deleted {h['name']}")
+        return
+
+    if a.cmd == "edit":
+        # There is no edit-a-logged-entry intent anywhere in FoodNoms' 45 —
+        # `EditFoodIntent` edits a food's definition in the library, not an
+        # entry in a day. So an edit is delete plus re-log, and the re-log goes
+        # through quick entry, which carries a name and macros but no reference
+        # to the library food. The barcode, the serving measure and the
+        # scannable identity do not survive. That is the cost, and it is why
+        # this prints what it is about to lose before doing it.
+        con = connect()
+        hits = [e for e in day(con, a.on)["entries"]
+                if a.target.upper() == (e["entry_id"] or "").upper()
+                or a.target.lower() in (e["name"] or "").lower()]
+        if not hits:
+            sys.exit(f"no entry matching {a.target!r} in the log for {a.on}")
+        if len(hits) > 1:
+            print(f"{len(hits)} entries match {a.target!r} in the log for {a.on}:",
+                  file=sys.stderr)
+            for h in hits:
+                print(f"  {h['name']}  {h['entry_id']}", file=sys.stderr)
+            sys.exit("refusing to guess — name the entry id")
+        e = hits[0]
+
+        macros = {k: getattr(a, k) for k in
+                  ("energyCalories", "protein", "carbs", "fat", "fiber",
+                   "sugars", "sodium")}
+        src = {"energyCalories": e.get("calories"), "protein": e.get("protein"),
+               "carbs": e.get("carbs"), "fat": e.get("fat"),
+               "fiber": e.get("fiber"), "sugars": e.get("sugars"),
+               "sodium": e.get("sodium")}
+        if a.scale is not None:
+            for k, v in src.items():
+                if macros[k] is None and v is not None:
+                    macros[k] = round(v * a.scale, 2)
+        for k, v in src.items():
+            if macros[k] is None and v is not None:
+                macros[k] = round(v, 2)
+        if all(v is None for v in macros.values()):
+            sys.exit("edit: nothing to write — give --scale or a macro flag")
+
+        # `date` is stored in UTC, and the intent reads what it is handed as
+        # local time. Passing the stored value straight back moves the entry by
+        # the UTC offset — seven hours in Vancouver, which is enough to push a
+        # late entry onto the next day and quietly change two days' totals.
+        when = a.to_date or utc_to_local(e["date"])
+        if e.get("barcode") or (e.get("food_id") or "").startswith(("foodnoms:", "local:")):
+            print(f"note: re-logging {e['name']} as a quick entry drops its "
+                  f"library identity ({e.get('barcode') or e.get('food_id')}).",
+                  file=sys.stderr)
+
+        # Delete first: re-logging first and failing to delete would double the
+        # day, which is worse than losing the entry and re-adding it by hand.
+        idx_when = f"{a.on} 12:00:00"
+        listed = call_bridge("entries", date=idx_when)
+        names = [n for n in (listed or "").splitlines() if n.strip()]
+        matches = [i for i, n in enumerate(names) if n == e["name"]]
+        if not matches:
+            sys.exit(f"edit: {e['name']!r} is not in what the intent returns for "
+                     f"{a.on}, so there is no position to delete. Edit it in "
+                     "FoodNoms.")
+        call_bridge("delete", date=idx_when, index=matches[0] + 1)
+        if [x for x in day(connect(), a.on)["entries"] if x["entry_id"] == e["entry_id"]]:
+            sys.exit(f"edit: could not delete {e['name']}; nothing was changed.")
+        call_bridge("log", name=e["name"], date=when,
+                    **{k: v for k, v in macros.items() if v is not None})
+        print(f"edited {e['name']} → {when}  "
+              + " ".join(f"{k}={v:g}" for k, v in macros.items() if v is not None))
         return
 
     if a.cmd in ("log", "create-food", "goal"):
