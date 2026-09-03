@@ -19,6 +19,7 @@ generated bridge Shortcut.
   foodnomsctl day [YYYY-MM-DD]
   foodnomsctl meals [name]
   foodnomsctl resolve-meal <name>
+  foodnomsctl barcodes
   foodnomsctl doctor
 
   foodnomsctl log <name> [--calories N] [--protein N] [--carbs N] [--fat N]
@@ -167,6 +168,38 @@ def as_food(row):
         d["measures"] = []
     d.update(nutrients(row))
     return d
+
+
+def barcodes(con):
+    """Every barcode the store knows, and the food behind it.
+
+    A phone cannot ask FoodNoms whether it recognises a barcode — both search
+    intents present a picker and block — so the answer has to travel to the
+    device ahead of time. This is that table: scanned in a shop, looked up in a
+    Shortcut with a dictionary get, no intent involved.
+
+    Both halves of the store contribute. `foodRecord` is the library, `foodEntryRecord`
+    is everything ever logged including database foods that were never saved to
+    it, and a barcode in either one is a barcode worth recognising.
+    """
+    out = {}
+    for row in con.execute("""
+        SELECT barcode, foodID, name, brandOwner, MAX(date) AS last
+        FROM foodEntryRecord
+        WHERE barcode IS NOT NULL AND barcode != ''
+        GROUP BY barcode
+    """):
+        out[str(row["barcode"])] = {"food_id": row["foodID"], "name": row["name"],
+                                    "brand": row["brandOwner"],
+                                    "last_logged": (row["last"] or "")[:10] or None}
+    for row in con.execute("""
+        SELECT barcode, foodID, name, brandOwner FROM foodRecord
+        WHERE barcode IS NOT NULL AND barcode != ''
+    """):
+        out.setdefault(str(row["barcode"]),
+                       {"food_id": row["foodID"], "name": row["name"],
+                        "brand": row["brandOwner"], "last_logged": None})
+    return out
 
 
 def catalog(con, min_count=1, since=None):
@@ -383,6 +416,7 @@ def main():
     m = sub.add_parser("meals"); m.add_argument("name", nargs="?")
     rm = sub.add_parser("resolve-meal"); rm.add_argument("name")
     sub.add_parser("doctor")
+    sub.add_parser("barcodes", help="every known barcode and the food behind it")
 
     lg = sub.add_parser("log", help="log a food by name with macros")
     lg.add_argument("name")
@@ -447,6 +481,14 @@ def main():
         return
 
     con = connect()
+
+    if a.cmd == "barcodes":
+        res = barcodes(con)
+        if a.json:
+            print(json.dumps(res, indent=1)); return
+        for code, f in sorted(res.items(), key=lambda kv: (kv[1]["name"] or "")):
+            print(f'{code:>16}  {(f["name"] or "")[:38]:38s} {(f["brand"] or "")[:18]:18s} {f["food_id"]}')
+        return
 
     if a.cmd == "catalog":
         res = catalog(con, a.min_count, a.since)
