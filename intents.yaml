@@ -29,7 +29,7 @@
 
 bundle: com.algebraiclabs.foodnoms
 team: 32642VZFU3
-shortcut_name: FoodNomsCTL Bridge
+shortcut_name: FoodNomsCTL Bridge 3
 
 commands:
   - command: log

@@ -226,6 +226,12 @@ def build(manifest):
 
         intent_uuid = str(uuid.uuid4()).upper()
         params["UUID"] = intent_uuid
+        # Without this the action shows its own sheet and waits — the delete
+        # branch put up a confirmation modal that has to be dismissed by hand,
+        # which defeats the point of a headless write path. It is not the
+        # intent's `deleteWithoutConfirmation`, which was already set: that is
+        # FoodNoms', this one is the Shortcuts action's.
+        params["ShowWhenRun"] = False
         params["AppIntentDescriptor"] = descriptor(bundle, spec["intent"],
                                                    manifest.get("team"))
         acts.append(action(f"{bundle}.{spec['intent']}", params))
@@ -271,6 +277,7 @@ def build(manifest):
                 p2 = dict(step.get("fixed") or {})
                 p2[step["param"]] = output_ref(prev_uuid, prev_name)
                 p2["UUID"] = su
+                p2["ShowWhenRun"] = False
                 p2["AppIntentDescriptor"] = descriptor(bundle, step["intent"],
                                                        manifest.get("team"))
                 acts.append(action(f"{bundle}.{step['intent']}", p2))

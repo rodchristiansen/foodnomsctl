@@ -45,7 +45,12 @@ BUNDLE = "com.algebraiclabs.foodnoms"
 # Importing a Shortcut does not replace a same-named one already in the library
 # — it is refused outright, so a rebuilt bridge cannot be installed over the old
 # one. Overriding the name is how a new build gets tested before it takes over.
-BRIDGE = os.environ.get("FOODNOMSCTL_BRIDGE", "FoodNomsCTL Bridge")
+# Version the name, because a Shortcut cannot be replaced. Importing does not
+# overwrite a same-named one — it is refused — and the `shortcuts` CLI cannot
+# delete, so the only way to ship a build that adds a command is under a name
+# nothing holds yet. The old "FoodNomsCTL Bridge" stays in the library, answering
+# with whatever it was built from; nothing dispatches to it any more.
+BRIDGE = os.environ.get("FOODNOMSCTL_BRIDGE", "FoodNomsCTL Bridge 3")
 
 # FoodNoms has moved its store twice. The Core Data one in the app group
 # container stops in 2022 and the group-container GRDB copy stops in 2025; both

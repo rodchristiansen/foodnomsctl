@@ -111,6 +111,33 @@ def resolve(plan):
     cannot be carried out fails having changed nothing."""
     out = []
     for item in plan:
+        # An `add` names a food in the library rather than an entry in the log:
+        # nothing is deleted, one entry appears. Half a breakfast that moved to
+        # the next day's smoothie is an add there and a scale back on the day it
+        # came from, and both belong in one plan so they are one Shortcut.
+        if item.get("add"):
+            food = json.loads(cli("resolve", item["add"], "--json"))[0]
+            measure = food.get("measure")
+            if item.get("unit"):
+                pool = [m for m in ([food.get("measure")]
+                                    + (food.get("measures") or [])) if m]
+                measure = next((m for m in pool
+                                if m.get("descriptionText") == item["unit"]), None)
+                if measure is None:
+                    have = sorted({m.get("descriptionText") or m.get("unit")
+                                   for m in pool})
+                    sys.exit(f"{food['name']} has no {item['unit']!r} measure — "
+                             f"it offers {have}")
+            if not measure:
+                sys.exit(f"{food['name']} carries no measure to log against")
+            out.append({"on": None, "to_date": item["date"],
+                        "quantity": float(item["quantity"]),
+                        "entry": {"name": food["name"],
+                                  "food_id": food["food_id"],
+                                  "barcode": food.get("barcode"),
+                                  "quantity": 0, "measure": measure,
+                                  "date": item["date"]}})
+            continue
         on = item["on"]
         entries = json.loads(cli("day", on, "--json"))["entries"]
         hits = [e for e in entries
@@ -155,7 +182,9 @@ def local_stamp(utc_text):
 def build(items, name):
     stamp = datetime.now().strftime("%Y.%m.%d.%H%M")
     lines = "\n".join(
-        f"  {i['entry']['name']}: {i['entry']['quantity']:g} → {i['quantity']:g}"
+        f"  {i['entry']['name']}: "
+        + ("add " if i["on"] is None else f"{i['entry']['quantity']:g} → ")
+        + f"{i['quantity']:g}"
         + (f"  → {i['to_date'][:10]}" if i.get("to_date") else "")
         for i in items)
     acts = [{"WFWorkflowActionIdentifier": "is.workflow.actions.comment",
@@ -228,7 +257,9 @@ def main():
         e, when = i["entry"], (i["to_date"] or local_stamp(i["entry"]["date"]))
         unit = (e["measure"].get("descriptionText")
                 or e["measure"].get("unit") or "serving")
-        print(f"{e['name']}: {e['quantity']:g} → {i['quantity']:g} x {unit}"
+        change = ("add" if i["on"] is None
+                  else f"{e['quantity']:g} →")
+        print(f"{e['name']}: {change} {i['quantity']:g} x {unit}"
               f"  @ {when}  [{e.get('barcode') or e.get('food_id')}]")
     if a.dry_run:
         return
@@ -261,6 +292,8 @@ def main():
     # entry deleted with no replacement waiting is the one unrecoverable state
     # here — the originals cannot be restored from anything this tool holds.
     for i in items:
+        if i["on"] is None:
+            continue
         subprocess.run([sys.executable, CLI, "delete", i["entry"]["entry_id"],
                         "--on", i["on"]], check=False)
     subprocess.run(["shortcuts", "run", a.name], check=False)
