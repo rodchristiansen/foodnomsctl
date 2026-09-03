@@ -314,6 +314,37 @@ def verify(workflow):
         sys.exit(f"control flow: {depth} block(s) left open")
 
 
+def library_holds(name):
+    """Whether the Shortcuts library holds one by this name.
+
+    Not `shortcuts list`. The library is a WAL-mode database and both that
+    command and a plain copy of the file read a snapshot from the last
+    checkpoint, which can be a day stale — which is how two imports that had in
+    fact succeeded were written up as a total failure to import anything.
+    Copying the -wal alongside it is what makes a just-finished import visible.
+    """
+    import shutil, sqlite3, tempfile
+    src = os.path.expanduser("~/Library/Shortcuts/Shortcuts.sqlite")
+    if not os.path.exists(src):
+        return False
+    tmp = tempfile.mkdtemp(prefix="fnbridge.lib.")
+    dst = os.path.join(tmp, "db.sqlite")
+    try:
+        shutil.copy2(src, dst)
+        for ext in ("-wal", "-shm"):
+            if os.path.exists(src + ext):
+                shutil.copy2(src + ext, dst + ext)
+        con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        row = con.execute("SELECT 1 FROM ZSHORTCUT WHERE ZNAME = ? LIMIT 1",
+                          (name,)).fetchone()
+        con.close()
+        return bool(row)
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="foodnomsctl-bridge", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -357,15 +388,11 @@ def main():
         # Importing does not replace a same-named Shortcut, it is refused, and
         # the `shortcuts` CLI cannot delete. So a rebuild under the canonical
         # name installs nothing and the old build keeps answering. Verify rather
-        # than assume — and read the WAL, because a plain copy of
-        # Shortcuts.sqlite lags behind by however long since the last checkpoint
-        # and will show yesterday's library.
+        # than assume.
         import time
         time.sleep(6)
-        listed = subprocess.run(["shortcuts", "list"], capture_output=True,
-                                text=True).stdout or ""
         name = manifest["shortcut_name"]
-        if name in listed.splitlines():
+        if library_holds(name):
             print(f'installed → "{name}"')
         else:
             print(f'NOT installed: "{name}" is not in the library. If a Shortcut '

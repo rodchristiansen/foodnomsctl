@@ -307,6 +307,34 @@ def parse_when(text):
             "'YYYY-MM-DD HH:MM'.")
 
 
+def food_entity_id(food_id):
+    """The `foodEntry` identifier LogIntent wants: a document, not an id.
+
+    It names the service the food came from and its id within that service —
+    `foodNoms` for anything out of FoodNoms' database, `manualEntry` for a food
+    created in the app — and it is what keeps a re-logged entry the same food,
+    barcode and all, rather than a name with macros attached.
+    """
+    if (food_id or "").startswith("local:"):
+        ident, service = food_id[len("local:"):], "manualEntry"
+    elif (food_id or "").startswith("foodnoms:"):
+        ident, service = food_id[len("foodnoms:"):], "foodNoms"
+    else:
+        ident, service = food_id, "foodNoms"
+    return json.dumps({"value": {"foodID": {"_0": {"serviceID": ident,
+                                                   "service": service}}}},
+                      separators=(",", ":"))
+
+
+def measure_entity_id(measure):
+    """The `foodMeasure` identifier: the store's own measure dictionary, wrapped.
+
+    Never invented — taken verbatim off the entry being replaced, so the portion
+    the quantity counts is the same portion it counted before.
+    """
+    return json.dumps({"value": measure}, separators=(",", ":"))
+
+
 def utc_to_local(stamp):
     """A stored entry timestamp, as local wall-clock time.
 
@@ -463,13 +491,12 @@ def main():
     ed.add_argument("--to-date", dest="to_date", type=parse_when,
                     help="move it to this day; omit to leave it where it is")
     ed.add_argument("--scale", type=float,
-                    help="multiply its macros by this, for a portion that was "
-                         "not the one logged (0.5 for half of it)")
-    for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
-                       ("--carbs", "carbs"), ("--fat", "fat"), ("--fiber", "fiber"),
-                       ("--sugars", "sugars"), ("--sodium", "sodium")):
-        ed.add_argument(flag, dest=dest, type=float,
-                        help=argparse.SUPPRESS)
+                    help="multiply the portion by this — 0.5 for half of what "
+                         "was logged. Macros follow the portion, because the "
+                         "food and its measure are kept.")
+    ed.add_argument("--quantity", type=float,
+                    help="set the portion outright, in the measure the entry "
+                         "already uses")
     dl.add_argument("--all", action="store_true",
                     help="delete every entry that matches, rather than refusing "
                          "to guess between them")
@@ -528,13 +555,12 @@ def main():
         return
 
     if a.cmd == "edit":
-        # There is no edit-a-logged-entry intent anywhere in FoodNoms' 45 —
-        # `EditFoodIntent` edits a food's definition in the library, not an
-        # entry in a day. So an edit is delete plus re-log, and the re-log goes
-        # through quick entry, which carries a name and macros but no reference
-        # to the library food. The barcode, the serving measure and the
-        # scannable identity do not survive. That is the cost, and it is why
-        # this prints what it is about to lose before doing it.
+        # FoodNoms has no edit-a-logged-entry intent among its 45 —
+        # EditFoodIntent edits a library food's definition, not an entry in a day
+        # — so an edit is delete plus re-log. The re-log goes through LogIntent
+        # with the food and measure the entry already carried, not through quick
+        # entry, so the corrected entry is the same food: same barcode, same
+        # portion, same everything but the number that was wrong.
         con = connect()
         hits = [e for e in day(con, a.on)["entries"]
                 if a.target.upper() == (e["entry_id"] or "").upper()
@@ -545,39 +571,33 @@ def main():
             print(f"{len(hits)} entries match {a.target!r} in the log for {a.on}:",
                   file=sys.stderr)
             for h in hits:
-                print(f"  {h['name']}  {h['entry_id']}", file=sys.stderr)
+                print(f"  {h['name']}  {h['entry_id']}  {h['quantity']:g} x "
+                      f"{h.get('unit_quantity') or 1:g}{h.get('unit') or ''}",
+                      file=sys.stderr)
             sys.exit("refusing to guess — name the entry id")
         e = hits[0]
 
-        macros = {k: getattr(a, k) for k in
-                  ("energyCalories", "protein", "carbs", "fat", "fiber",
-                   "sugars", "sodium")}
-        src = {"energyCalories": e.get("calories"), "protein": e.get("protein"),
-               "carbs": e.get("carbs"), "fat": e.get("fat"),
-               "fiber": e.get("fiber"), "sugars": e.get("sugars"),
-               "sodium": e.get("sodium")}
-        if a.scale is not None:
-            for k, v in src.items():
-                if macros[k] is None and v is not None:
-                    macros[k] = round(v * a.scale, 2)
-        for k, v in src.items():
-            if macros[k] is None and v is not None:
-                macros[k] = round(v, 2)
-        if all(v is None for v in macros.values()):
-            sys.exit("edit: nothing to write — give --scale or a macro flag")
+        if a.quantity is not None:
+            qty = a.quantity
+        elif a.scale is not None:
+            qty = (e.get("quantity") or 0) * a.scale
+        else:
+            sys.exit("edit: nothing to change — give --scale or --quantity")
+        if qty <= 0:
+            sys.exit(f"edit: quantity would be {qty:g}. To remove it, use `delete`.")
 
-        # `date` is stored in UTC, and the intent reads what it is handed as
+        measure = e.get("measure")
+        if not measure:
+            sys.exit(f"edit: {e['name']} carries no measure, so a re-log could "
+                     "only guess the portion. Edit it in FoodNoms.")
+
+        # `date` is stored in UTC and every intent reads what it is handed as
         # local time. Passing the stored value straight back moves the entry by
-        # the UTC offset — seven hours in Vancouver, which is enough to push a
-        # late entry onto the next day and quietly change two days' totals.
+        # the UTC offset — seven hours in Vancouver, enough to push a late entry
+        # onto the next day and quietly change two days' totals.
         when = a.to_date or utc_to_local(e["date"])
-        if e.get("barcode") or (e.get("food_id") or "").startswith(("foodnoms:", "local:")):
-            print(f"note: re-logging {e['name']} as a quick entry drops its "
-                  f"library identity ({e.get('barcode') or e.get('food_id')}).",
-                  file=sys.stderr)
+        target_day = when[:10]
 
-        # Delete first: re-logging first and failing to delete would double the
-        # day, which is worse than losing the entry and re-adding it by hand.
         idx_when = f"{a.on} 12:00:00"
         listed = call_bridge("entries", date=idx_when)
         names = [n for n in (listed or "").splitlines() if n.strip()]
@@ -586,13 +606,28 @@ def main():
             sys.exit(f"edit: {e['name']!r} is not in what the intent returns for "
                      f"{a.on}, so there is no position to delete. Edit it in "
                      "FoodNoms.")
+
+        # Delete first. Re-logging first and then failing to delete would double
+        # the day, which is a worse state to land in than a missing entry.
         call_bridge("delete", date=idx_when, index=matches[0] + 1)
         if [x for x in day(connect(), a.on)["entries"] if x["entry_id"] == e["entry_id"]]:
             sys.exit(f"edit: could not delete {e['name']}; nothing was changed.")
-        call_bridge("log", name=e["name"], date=when,
-                    **{k: v for k, v in macros.items() if v is not None})
-        print(f"edited {e['name']} → {when}  "
-              + " ".join(f"{k}={v:g}" for k, v in macros.items() if v is not None))
+
+        unit_name = (measure.get("descriptionText")
+                     or measure.get("unit") or "serving")
+        call_bridge("log-food", date=when, quantity=f"{qty:g}",
+                    foodIdentifier=food_entity_id(e.get("food_id")),
+                    foodName=e["name"],
+                    measureIdentifier=measure_entity_id(measure),
+                    measureName=unit_name)
+
+        after = [x for x in day(connect(), target_day)["entries"]
+                 if x["name"] == e["name"] and abs((x.get("quantity") or 0) - qty) < 1e-6]
+        if not after:
+            sys.exit(f"edit: deleted {e['name']} but the re-log did not land on "
+                     f"{target_day}. Re-add it in FoodNoms: {qty:g} x {unit_name}.")
+        print(f"{e['name']}: {e['quantity']:g} → {qty:g} x {unit_name}"
+              + (f", moved to {target_day}" if target_day != a.on else ""))
         return
 
     if a.cmd in ("log", "create-food", "goal"):
