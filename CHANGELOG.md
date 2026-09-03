@@ -57,3 +57,14 @@ Adds the write path. Reads still go straight to SQLite; nothing ever writes the 
 - `search` and `resolve` report each food's `measure` and full `measures` list, which is what a
   generator needs to write a `foodMeasure` — the intent's measure identifier is that dictionary
   wrapped in a `value` key.
+
+## Unreleased
+
+- `log --date` — log to an earlier day rather than to now. `LogQuickEntryIntent` has always
+  declared an optional `date`; the bridge simply never bound it, so correcting an earlier day
+  was impossible and the limitation looked like FoodNoms'. A bare `YYYY-MM-DD` logs at noon,
+  because FoodNoms buckets by local day and midnight is the boundary a timezone offset pushes
+  across.
+- Issue 002 — Shortcuts installs nothing on this machine, from any path, silently. Everything
+  above is generated but **unverified**: the rebuilt bridge cannot be imported, so the write
+  surface is frozen at whatever build is already installed.

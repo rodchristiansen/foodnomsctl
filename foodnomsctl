@@ -21,7 +21,7 @@ generated bridge Shortcut.
   foodnomsctl resolve-meal <name>
   foodnomsctl doctor
 
-  foodnomsctl log <name> [--calories N] [--protein N] [--carbs N] [--fat N]
+  foodnomsctl log <name> [--date WHEN] [--calories N] [--protein N] [--fat N]
   foodnomsctl create-food <name> [--brand B] [--barcode B] [--calories N] ...
   foodnomsctl delete <entry-id|name> [--on YYYY-MM-DD]
   foodnomsctl goal
@@ -280,6 +280,30 @@ def meals(con, name=None, kind=MEAL):
     return out
 
 
+def parse_when(text):
+    """Normalise a user-supplied date for the log intent.
+
+    The intent takes a Date, and Shortcuts coerces the text token it is handed,
+    so what matters is handing it something unambiguous. A bare date logs at
+    noon rather than midnight: FoodNoms buckets an entry by its local day, and
+    midnight is the boundary where a timezone offset moves it to the day before.
+    """
+    text = (text or "").strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").replace(
+            hour=12).strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a date this understands: {text!r}. Use YYYY-MM-DD or "
+            "'YYYY-MM-DD HH:MM'.")
+
+
 def call_bridge(command, timeout=25, **params):
     """Dispatch one App Intent through the bridge Shortcut.
 
@@ -386,6 +410,10 @@ def main():
 
     lg = sub.add_parser("log", help="log a food by name with macros")
     lg.add_argument("name")
+    lg.add_argument("--date", dest="date", type=parse_when,
+                    help="when to log it: YYYY-MM-DD, 'YYYY-MM-DD HH:MM', or an "
+                         "ISO-8601 timestamp (default now). Correcting an "
+                         "earlier day is the point of this flag.")
     for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
                        ("--carbs", "carbs"), ("--fat", "fat"), ("--fiber", "fiber"),
                        ("--sugars", "sugars"), ("--sodium", "sodium")):

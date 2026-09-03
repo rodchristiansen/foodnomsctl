@@ -41,6 +41,13 @@ commands:
       requireMacros: true
     params:
       name: {type: text, required: true}
+      # `date` is optional on the intent and was long assumed absent, so every
+      # entry landed at "now" and a correction to an earlier day was impossible.
+      # It is a Date primitive, not an entity, so it binds from a run-time value
+      # like every other field here. `dateTimePreference: dateAndTime` above is
+      # what makes the intent honour both halves of what is passed; with the
+      # date omitted that same enum simply means now.
+      date: {type: text}
       energyCalories: {type: number}
       protein: {type: number}
       carbs: {type: number}
