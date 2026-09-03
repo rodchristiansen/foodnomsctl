@@ -494,11 +494,13 @@ def main():
             sys.exit("refusing to guess — name the entry id, or pass --all")
 
         # The bridge deletes by position in GetFoodEntriesIntent's own output,
-        # which is not this list: the intent leaves out water and drink entries,
-        # so an index taken from the store is off by however many of those came
-        # first. Ask the bridge for its list and resolve against that, rather
-        # than modelling a rule that is only inferred. Deleting is permanent, so
-        # a name that is not in the returned list is a stop, not a best guess.
+        # which is not this list: the intent returns fewer entries than the store
+        # holds, so an index taken from SQL is off by however many it dropped.
+        # Which ones it drops is not documented and not worth inferring — a day
+        # of HidrateSpark bottle logs vanished while a `Water` food on another
+        # day came back. So ask for the list and resolve against it. Deleting is
+        # permanent, so a name the intent does not return is a stop, not a
+        # best guess.
         when = f"{a.on} 12:00:00"
         listed = call_bridge("entries", date=when)
         if not listed:
@@ -513,8 +515,7 @@ def main():
             if not matches:
                 sys.exit(f"delete: {h['name']!r} is in the store for {a.on} but not "
                          "in what the intent returns for that day, so there is no "
-                         "position to delete. Water and drink entries are the "
-                         "known case; delete it in FoodNoms.")
+                         "position to delete. Delete it in FoodNoms.")
             targets.append((matches.pop(0), h))
         for idx, h in sorted(targets, reverse=True):
             call_bridge("delete", date=when, index=idx + 1)

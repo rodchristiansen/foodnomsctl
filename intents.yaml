@@ -102,6 +102,8 @@ commands:
     # an entity's properties. The index is not a guess: `entries` returns the
     # same list in the same order, so the caller resolves the name against the
     # list this branch re-fetches, and passes a position it has already checked.
+    # That indirection is load-bearing — the intent returns fewer entries than
+    # the store holds, and which it drops is undocumented.
     fixed:
       dayOption: onDate
     omit_required: [mealType]
@@ -118,10 +120,11 @@ commands:
     intent: GetFoodEntriesIntent
     summary: Read one day's entries back as text — the list `delete` indexes into
     # A read the store already answers faster, wrapped for one reason: it is the
-    # list `delete` counts positions in. The intent leaves out water and drink
-    # entries, so its order is not the store's, and the only safe way to turn a
-    # name into a position is to ask for the same list the delete branch will
-    # re-fetch.
+    # list `delete` counts positions in. The intent returns fewer entries than
+    # the store holds — a day of HidrateSpark bottle logs did not come back,
+    # while a `Water` food on another day did — so its order is not the store's
+    # and the rule is not worth guessing at. Asking for the same list the delete
+    # branch re-fetches is the only safe way to turn a name into a position.
     fixed:
       dayOption: onDate
     omit_required: [mealType]
