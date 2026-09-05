@@ -144,10 +144,25 @@ foodnomsctl create-food "House Granola" --brand "Homemade" --calories 220 --prot
 foodnomsctl goal
 ```
 
-`delete` is wired and does not work — the intent accepts the request and does
-nothing, because an entity parameter will not bind from a run-time value. The
-command reads the store back afterwards and tells you so rather than reporting a
-success that did not happen. See [issue 001](docs/issues/001-delete-does-not-bind-a-runtime-entity.md).
+`delete` and `edit` correct the log rather than only appending to it, and
+`log --date` writes to an earlier day. `delete` works by chaining
+`GetFoodEntriesIntent` into the delete rather than passing an identifier, which
+is what closed [issue 001](docs/issues/001-delete-does-not-bind-a-runtime-entity.md);
+it deletes by position in the intent's own list, which is not the store's, so it
+resolves against that list rather than inferring an index.
+
+Writes are queued before they are attempted. Shortcuts does not run while the
+Mac's screen is locked — `shortcuts run` hangs until it is killed and an import
+silently does nothing, and neither reports an error — so a write attempted then
+is lost in a way that reports success. `log` detects the lock up front and
+returns immediately with the request on disk; `flush` drains the queue, and
+`./install-agent.sh` installs a launchd agent that drains it automatically
+within a minute of the Mac becoming usable.
+
+```bash
+foodnomsctl flush
+./install-agent.sh
+```
 
 One Shortcut rather than one per intent, because installing a suite of twelve is a chore and
 they drift apart. Generated rather than hand-built, because a dispatcher is N branches of
@@ -162,11 +177,13 @@ bridge it runs.
 
 ### Which intents are wrapped, and why so few
 
-FoodNoms ships 45 App Intents; the manifest wraps four. Nine only open UI and do nothing
+FoodNoms ships 45 App Intents; the manifest wraps five. Nine only open UI and do nothing
 headless. Most of the rest are reads that `foodnomsctl` already answers faster and in more
 detail from the store — wrapping `GetFoodEntriesIntent` would be strictly worse than
-`foodnomsctl day`. So what is left is the writes the store must never perform itself, plus
-`goal`, which is state the log does not hold.
+`foodnomsctl day`. So what is left is the writes the store must never perform itself, plus `goal`,
+which is state the log does not hold, and `entries`, which is the list `delete`
+counts positions in — the intent omits water and drink entries, so its order is
+not the store's and has to be observed rather than assumed.
 
 Entity-typed parameters — `mealType`, `foodMeasure`, `favorite` — are not exposed. Shortcuts
 resolves an entity through picker UI with no headless equivalent. That is the ceiling of this

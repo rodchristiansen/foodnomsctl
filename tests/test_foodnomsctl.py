@@ -180,17 +180,20 @@ class TestBridgeInstalled(unittest.TestCase):
     copy under a new name.
     """
 
+    # The bridge name is configurable (FOODNOMSCTL_BRIDGE), so these anchor on
+    # whatever this build actually dispatches to rather than on a literal.
     def test_exact_name_only(self):
-        self.assertEqual(fn.bridge_installed("Log Water\nFoodNomsCTL Bridge\n"),
+        self.assertEqual(fn.bridge_installed(f"Log Water\n{fn.BRIDGE}\n"),
                          (True, []))
 
     def test_a_numbered_copy_is_not_the_bridge(self):
-        present, near = fn.bridge_installed("Log Water\nFoodNomsCTL Bridge 3\n")
+        other = fn.BRIDGE + " 9"
+        present, near = fn.bridge_installed(f"Log Water\n{other}\n")
         self.assertFalse(present)
-        self.assertEqual(near, ["FoodNomsCTL Bridge 3"])
+        self.assertEqual(near, [other])
 
     def test_surrounding_whitespace_does_not_hide_it(self):
-        self.assertTrue(fn.bridge_installed("  FoodNomsCTL Bridge  \n")[0])
+        self.assertTrue(fn.bridge_installed(f"  {fn.BRIDGE}  \n")[0])
 
     def test_an_empty_library_is_not_a_crash(self):
         self.assertEqual(fn.bridge_installed(""), (False, []))
