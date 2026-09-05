@@ -30,6 +30,7 @@ generated bridge Shortcut.
 --json on any subcommand.
 """
 import argparse
+import fcntl
 import glob
 import json
 import os
@@ -599,11 +600,41 @@ def dispatch(command, params, settle=45):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+LOCK = os.path.join(SPOOL, "flush.lock")
+
+
 def flush(verbose=True):
-    """Drain the queue. A no-op, and a fast one, while the screen is locked."""
+    """Drain the queue, one drainer at a time.
+
+    The exclusive lock is not a nicety. The launchd agent drains on an interval
+    AND on any change to the queue directory, so a drain started by hand runs
+    beside one started by the agent; both see the same pending request, both
+    dispatch it, and neither has landed yet when the other checks. That turned
+    nine queued items into ninety entries. Claiming a request is therefore
+    serialized, and a second drainer leaves rather than waiting — whatever it
+    would have done, the drainer holding the lock is already doing.
+
+    A no-op, and a fast one, while the screen is locked.
+    """
     items = queued()
     if not items:
         return 0, 0
+    os.makedirs(SPOOL, exist_ok=True)
+    lock = open(LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if verbose:
+            print("another drain is already running", file=sys.stderr)
+        return 0, len(items)
+    try:
+        return _flush(items, verbose)
+    finally:
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        lock.close()
+
+
+def _flush(items, verbose):
     if screen_is_locked():
         if verbose:
             print(f"{len(items)} queued; screen is locked, so Shortcuts cannot "
@@ -612,8 +643,13 @@ def flush(verbose=True):
     os.makedirs(DONE, exist_ok=True)
     ok = 0
     for path in items:
+        # Claim the request by moving it aside before doing anything with it,
+        # so a crash mid-write leaves it claimed rather than pending — a
+        # duplicate meal is worse to undo than a missing one is to re-enter.
+        claim = path + ".claimed"
         try:
-            with open(path) as fh:
+            os.rename(path, claim)
+            with open(claim) as fh:
                 req = json.load(fh)
         except (OSError, ValueError):
             continue
@@ -621,18 +657,21 @@ def flush(verbose=True):
         if entry_exists(command, params):
             # Already in the store — a previous run wrote it and died before it
             # could clear the queue. Retrying would double-log.
-            os.rename(path, os.path.join(DONE, os.path.basename(path)))
+            os.rename(claim, os.path.join(DONE, os.path.basename(path)))
             ok += 1
             continue
         good, detail = dispatch(command, params)
         if good:
-            os.rename(path, os.path.join(DONE, os.path.basename(path)))
+            os.rename(claim, os.path.join(DONE, os.path.basename(path)))
             ok += 1
             if verbose:
                 print(f"logged {params.get('name', command)}")
-        elif verbose:
-            print(f"still queued: {params.get('name', command)} — {detail}",
-                  file=sys.stderr)
+        else:
+            # Not written, so put it back for the next drain.
+            os.rename(claim, path)
+            if verbose:
+                print(f"still queued: {params.get('name', command)} — {detail}",
+                      file=sys.stderr)
     return ok, len(queued())
 
 
