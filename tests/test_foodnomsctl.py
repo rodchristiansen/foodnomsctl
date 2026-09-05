@@ -200,6 +200,32 @@ class TestBridgeInstalled(unittest.TestCase):
         self.assertEqual(fn.bridge_installed(None), (False, []))
 
 
+class TestRequiredMacros(unittest.TestCase):
+    """The guard on the four macros FoodNoms insists on.
+
+    Without it, a `log` missing one does not fail — FoodNoms puts up its own
+    prompt and waits, so a headless run blocks on a dialog nobody can answer.
+    """
+
+    def test_all_four_present_is_clean(self):
+        self.assertEqual(fn.missing_macros(
+            {"energyCalories": 100, "protein": 5, "carbs": 2, "fat": 1}), [])
+
+    def test_zero_is_a_value_not_a_gap(self):
+        self.assertEqual(fn.missing_macros(
+            {"energyCalories": 0, "protein": 0, "carbs": 0, "fat": 0}), [])
+
+    def test_names_every_missing_one_as_its_flag(self):
+        self.assertEqual(fn.missing_macros({"energyCalories": 7, "protein": 1}),
+                         ["--carbs", "--fat"])
+
+    def test_the_optional_three_are_not_required(self):
+        # The nine-item meal that logged unattended supplied the four and
+        # omitted fiber, sugars and sodium.
+        self.assertEqual(fn.missing_macros(
+            {"energyCalories": 560, "protein": 18, "carbs": 48, "fat": 34}), [])
+
+
 class TestStoreDiscovery(unittest.TestCase):
     def test_the_abandoned_stores_are_named_so_they_can_be_ruled_out(self):
         # Both are still on disk on any machine that has run FoodNoms for long
