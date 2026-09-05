@@ -20,6 +20,7 @@ generated bridge Shortcut.
   foodnomsctl meals [name]
   foodnomsctl resolve-meal <name>
   foodnomsctl doctor
+  foodnomsctl flush
 
   foodnomsctl log <name> [--date WHEN] [--calories N] [--protein N] [--fat N]
   foodnomsctl create-food <name> [--brand B] [--barcode B] [--calories N] ...
@@ -471,6 +472,170 @@ def fmt_food(f, indent=""):
     return f"{indent}{f['name']}  [{q} × {unit}]  {macro}"
 
 
+# ---------------------------------------------------------------- the queue
+#
+# Every write is queued to a file before it is attempted, and only removed once
+# the store confirms it landed. That is not belt-and-braces: the Shortcuts path
+# is unavailable whenever the Mac's screen is locked, which is most of the time
+# for a session driven from a phone, and a write attempted then is lost in a way
+# that reports success. Queue first, drain when the machine can actually write.
+#
+# One file per request rather than one append-only log: requests are written
+# from more than one process, and a directory of small files has no concurrent
+# writer to lose — which also makes it safe to point at an iCloud folder.
+#
+# The default is deliberately a local path, not the iCloud spool. A launchd
+# agent does not inherit the terminal's Full Disk Access, so an agent draining a
+# queue inside ~/Library/Mobile Documents dies on PermissionError before it
+# reads a single request. Set FOODNOMSCTL_SPOOL to the spool to share the queue
+# with the phone, and grant the agent Full Disk Access if it is to drain that.
+SPOOL = os.environ.get(
+    "FOODNOMSCTL_SPOOL",
+    os.path.expanduser("~/.local/state/foodnomsctl/queue"))
+PENDING = os.path.join(SPOOL, "pending")
+DONE = os.path.join(SPOOL, "done")
+
+
+def screen_is_locked():
+    """Whether the login session's screen is locked.
+
+    Shortcuts will not run while it is: `shortcuts run` hangs until it is
+    killed, and importing a Shortcut silently does nothing. Neither reports an
+    error, so this is checked up front rather than inferred from a timeout.
+    """
+    out = subprocess.run(["ioreg", "-n", "Root", "-d1", "-a"],
+                         capture_output=True, text=True)
+    body = out.stdout or ""
+    i = body.find("CGSSessionScreenIsLocked")
+    return i != -1 and "<true/>" in body[i:i + 120]
+
+
+def enqueue(command, params):
+    os.makedirs(PENDING, exist_ok=True)
+    req = {"command": command, "queued": datetime.now().isoformat(timespec="seconds"),
+           "params": {k: v for k, v in params.items() if v is not None}}
+    name = f"{datetime.now():%Y%m%dT%H%M%S}-{uuid.uuid4().hex[:8]}.json"
+    path = os.path.join(PENDING, name)
+    tmp = path + ".part"
+    with open(tmp, "w") as fh:
+        json.dump(req, fh, indent=2)
+    # Rename into place so a drain never reads a half-written request.
+    os.rename(tmp, path)
+    return path
+
+
+def queued():
+    if not os.path.isdir(PENDING):
+        return []
+    return sorted(os.path.join(PENDING, n) for n in os.listdir(PENDING)
+                  if n.endswith(".json"))
+
+
+def entry_exists(command, params):
+    """Whether the store already holds what this request would write.
+
+    This is what replaces waiting on `shortcuts run`. The log intent completes
+    the write and then never hands control back, so the only signal that a write
+    succeeded is the entry appearing — and once it has, there is nothing left to
+    wait for.
+    """
+    if command != "log":
+        return False
+    name = params.get("name")
+    when = (params.get("date") or "")[:10] or date.today().isoformat()
+    try:
+        con = connect()
+        return any((e["name"] or "") == name for e in day(con, when)["entries"])
+    except (sqlite3.Error, SystemExit):
+        return False
+
+
+def dispatch(command, params, settle=45):
+    """Run one queued request, returning as soon as the store confirms it.
+
+    The old code waited a flat 90s for a return value that never comes, so nine
+    items cost thirteen minutes of pure waiting. Polling the store instead costs
+    a couple of seconds per item, and the flat wait survives only as the cap for
+    a write that never appears at all.
+    """
+    if not ensure_app_running():
+        return False, "FoodNoms would not launch"
+    tmp = tempfile.mkdtemp(prefix="foodnomsctl.")
+    req = os.path.join(tmp, "request.json")
+    res = os.path.join(tmp, "result.txt")
+    payload = {"command": command}
+    payload.update(params)
+    try:
+        with open(req, "w") as fh:
+            json.dump(payload, fh)
+        proc = subprocess.Popen(["shortcuts", "run", BRIDGE, "-i", req, "-o", res],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True)
+        deadline = time.monotonic() + settle
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                err = (proc.stderr.read() or "").strip()
+                if proc.returncode != 0:
+                    return False, err or f"shortcuts run failed ({proc.returncode})"
+                break
+            if entry_exists(command, params):
+                break
+            time.sleep(1)
+        else:
+            proc.kill()
+            return False, "no entry appeared before the cap"
+        # A write that has landed leaves `shortcuts run` hanging with nothing
+        # left to do; killing it here is what the flat timeout used to do at 90s.
+        if proc.poll() is None:
+            proc.kill()
+        if command == "log" and not entry_exists(command, params):
+            return False, "the intent accepted the request without writing"
+        out = ""
+        if os.path.exists(res):
+            with open(res, encoding="utf-8", errors="replace") as fh:
+                out = fh.read().strip()
+        return True, out
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def flush(verbose=True):
+    """Drain the queue. A no-op, and a fast one, while the screen is locked."""
+    items = queued()
+    if not items:
+        return 0, 0
+    if screen_is_locked():
+        if verbose:
+            print(f"{len(items)} queued; screen is locked, so Shortcuts cannot "
+                  "run. They will be logged on unlock.", file=sys.stderr)
+        return 0, len(items)
+    os.makedirs(DONE, exist_ok=True)
+    ok = 0
+    for path in items:
+        try:
+            with open(path) as fh:
+                req = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        command, params = req.get("command"), req.get("params", {})
+        if entry_exists(command, params):
+            # Already in the store — a previous run wrote it and died before it
+            # could clear the queue. Retrying would double-log.
+            os.rename(path, os.path.join(DONE, os.path.basename(path)))
+            ok += 1
+            continue
+        good, detail = dispatch(command, params)
+        if good:
+            os.rename(path, os.path.join(DONE, os.path.basename(path)))
+            ok += 1
+            if verbose:
+                print(f"logged {params.get('name', command)}")
+        elif verbose:
+            print(f"still queued: {params.get('name', command)} — {detail}",
+                  file=sys.stderr)
+    return ok, len(queued())
+
+
 def main():
     ap = argparse.ArgumentParser(prog="foodnomsctl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -494,6 +659,8 @@ def main():
     sub.add_parser("doctor")
 
     lg = sub.add_parser("log", help="log a food by name with macros")
+    lg.add_argument("--queue-only", action="store_true",
+                    help="queue without attempting to write")
     lg.add_argument("name")
     lg.add_argument("--date", dest="date", type=parse_when,
                     help="when to log it: YYYY-MM-DD, 'YYYY-MM-DD HH:MM', or an "
@@ -504,6 +671,8 @@ def main():
                        ("--sugars", "sugars"), ("--sodium", "sodium")):
         lg.add_argument(flag, dest=dest, type=float)
     cf = sub.add_parser("create-food", help="create a food in the library")
+    cf.add_argument("--queue-only", action="store_true",
+                    help="queue without attempting to write")
     cf.add_argument("name")
     cf.add_argument("--brand"); cf.add_argument("--barcode")
     cf.add_argument("--serving-size", dest="servingSize")
@@ -511,6 +680,7 @@ def main():
                        ("--carbs", "carbs"), ("--fat", "fat")):
         cf.add_argument(flag, dest=dest, type=float)
     sub.add_parser("goal", help="today's goal")
+    sub.add_parser("flush", help="log everything queued, if the Mac can write")
     dl = sub.add_parser("delete", help="delete a logged entry by name or entry id")
     dl.add_argument("target", help="entry id, or a name to match in a day's log")
     dl.add_argument("--on", default=date.today().isoformat(),
@@ -661,16 +831,46 @@ def main():
               + (f", moved to {target_day}" if target_day != a.on else ""))
         return
 
-    if a.cmd in ("log", "create-food", "goal"):
-        fields = {k: v for k, v in vars(a).items() if k not in ("cmd", "json")}
-        out = call_bridge(a.cmd, **fields)
-        if out is None:
-            # The intent wrote and then did not hand control back. Say so rather
-            # than reporting a failure that did not happen.
-            print(f"{a.cmd}: submitted; the intent did not return. "
-                  "Verify with `foodnomsctl day`.", file=sys.stderr)
+    if a.cmd == "flush":
+        ok, left = flush()
+        if a.json:
+            print(json.dumps({"logged": ok, "queued": left}, indent=2))
+        elif not ok and not left:
+            print("nothing queued")
+        else:
+            print(f"logged {ok}, {left} still queued")
+        return 0 if not left else 2
+
+    if a.cmd == "goal":
+        # A read, so there is nothing to queue: a goal fetched later is not the
+        # same answer, and a stale one is worse than none.
+        if screen_is_locked():
+            sys.exit("the screen is locked, so Shortcuts cannot run; `goal` "
+                     "needs the bridge and has no queued form.")
+        good, out = dispatch("goal", {})
+        if not good:
+            sys.exit(f"goal: {out}")
+        print(json.dumps({"command": "goal", "result": out}, indent=2)
+              if a.json else out)
+        return
+
+    if a.cmd in ("log", "create-food"):
+        fields = {k: v for k, v in vars(a).items()
+                  if k not in ("cmd", "json", "queue_only")}
+        # Queued before it is attempted, so a write is never lost to a locked
+        # screen, a crash, or a bridge that accepts and does nothing.
+        path = enqueue(a.cmd, fields)
+        if getattr(a, "queue_only", False):
+            print(f"queued {os.path.basename(path)}")
             return
-        print(json.dumps({"command": a.cmd, "result": out}, indent=2) if a.json else out)
+        ok, left = flush(verbose=False)
+        if ok:
+            print(f"logged {fields.get('name', a.cmd)}")
+        else:
+            why = ("the screen is locked" if screen_is_locked()
+                   else "the write did not land")
+            print(f"queued — {why}. It will be logged automatically when this "
+                  "Mac is unlocked, or now from the phone.", file=sys.stderr)
         return
 
     con = connect()
