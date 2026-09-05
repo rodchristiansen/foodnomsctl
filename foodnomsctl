@@ -564,6 +564,21 @@ def screen_is_locked():
     return i != -1 and "<true/>" in body[i:i + 120]
 
 
+# `requireMacros: true` on LogQuickEntryIntent makes FoodNoms insist on these
+# four. It does not fail when one is missing — it puts up its own prompt ("How
+# much total fat?") and waits, so a headless run blocks forever on a dialog
+# nobody can answer and the request sits claimed in the queue. Fiber, sugars and
+# sodium are genuinely optional under the same flag: the nine-item meal that
+# logged unattended supplied exactly these four and omitted those three.
+REQUIRED_MACROS = ("energyCalories", "protein", "carbs", "fat")
+MACRO_FLAG = {"energyCalories": "--calories", "protein": "--protein",
+              "carbs": "--carbs", "fat": "--fat"}
+
+
+def missing_macros(params):
+    return [MACRO_FLAG[k] for k in REQUIRED_MACROS if params.get(k) is None]
+
+
 def enqueue(command, params):
     os.makedirs(PENDING, exist_ok=True)
     req = {"command": command, "queued": datetime.now().isoformat(timespec="seconds"),
@@ -642,8 +657,20 @@ def dispatch(command, params, settle=45):
         # left to do; killing it here is what the flat timeout used to do at 90s.
         if proc.poll() is None:
             proc.kill()
-        if command == "log" and not entry_exists(command, params):
-            return False, "the intent accepted the request without writing"
+        # Settle before declaring failure. FoodNoms commits through its own WAL
+        # and the snapshot taken here can be a beat behind it, so a write that
+        # has in fact landed reads as missing for a second or two. Reporting
+        # failure then leaves the request pending, the agent retries it, and the
+        # meal is logged twice — which is exactly how two Probe entries appeared
+        # ten seconds apart. A missing entry is cheap to re-check; a duplicate
+        # costs a manual delete.
+        if command == "log":
+            for _ in range(8):
+                if entry_exists(command, params):
+                    break
+                time.sleep(1)
+            else:
+                return False, "the intent accepted the request without writing"
         out = ""
         if os.path.exists(res):
             with open(res, encoding="utf-8", errors="replace") as fh:
@@ -952,6 +979,14 @@ def main():
     if a.cmd in ("log", "create-food"):
         fields = {k: v for k, v in vars(a).items()
                   if k not in ("cmd", "json", "queue_only")}
+        if a.cmd == "log":
+            gap = missing_macros(fields)
+            if gap:
+                sys.exit(f"log needs {', '.join(gap)}: FoodNoms is configured to "
+                         "require calories, protein, carbs and fat, and it asks "
+                         "for a missing one in a dialog rather than failing — "
+                         "which never returns on a headless run. Pass 0 if a "
+                         "macro really is zero.")
         # Queued before it is attempted, so a write is never lost to a locked
         # screen, a crash, or a bridge that accepts and does nothing.
         path = enqueue(a.cmd, fields)

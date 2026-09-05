@@ -67,6 +67,48 @@ If `doctor` reports that it cannot open the store, the app group container is TC
 the process running FoodNomsCTL needs Full Disk Access. That is the terminal, or the agent host,
 not the CLI itself — macOS attributes the access to the responsible process.
 
+## What works headlessly
+
+Verified against a live 16,495-entry store, not inferred from the metadata.
+
+**Reads need nothing but the file.** They open a snapshot of the store and touch
+no other process, so they work over SSH, with FoodNoms closed, and while the
+Mac's screen is locked. Every one takes `--json`.
+
+| Command | Typical |
+|---|---|
+| `doctor` | 0.4s |
+| `catalog` | 0.3s |
+| `search` · `resolve` | 0.4s |
+| `day` · `meals` · `resolve-meal` · `barcodes` | 0.1s |
+
+**Writes need an unlocked GUI session.** They dispatch App Intents through a
+Shortcut, and Shortcuts does not run while the screen is locked: `shortcuts run`
+hangs until it is killed and an import silently does nothing, neither reporting
+an error. That is not a bug this tool can fix — it is what the only supported
+write path costs. What it does instead is refuse to lose the write: every one is
+queued to a file first, `log` returns in about a tenth of a second with the
+request safely on disk, and `flush` — or the launchd agent from
+`./install-agent.sh` — drains the queue within a minute of the Mac becoming
+usable. With the screen unlocked, `log` completes in about 1.3s and `goal` in
+about 3s.
+
+**`log` requires all four core macros.** `requireMacros` is set on
+`LogQuickEntryIntent`, and FoodNoms does not fail when one is missing — it puts
+up its own prompt ("How much total fat?") and waits, which on a headless run is
+a hang, not an error. So `log` refuses up front and names the missing flags.
+Fiber, sugars and sodium are genuinely optional. Pass `0` where a macro really
+is zero.
+
+```bash
+foodnomsctl log "Cold brew" --calories 15 --protein 1 --carbs 0 --fat 0
+```
+
+**Nothing else blocks on UI.** The intents that would — the two search intents,
+which present the food picker, and `AskFoodnomsAI`, whose `mealType` is
+entity-typed — are deliberately not wrapped, for the reasons in
+[intents.yaml](intents.yaml) and [docs/app-intents.md](docs/app-intents.md).
+
 ## Commands
 
 Every command takes `--json`.
@@ -222,13 +264,32 @@ number back to it. Structured `--json` on every command is the point, not a conv
 
 Stated plainly, because they are structural:
 
-- **Writes need the bridge Shortcut imported once.** Reads work immediately; `doctor` tells you
-  whether the write path is installed.
+- **Writes need the bridge Shortcut imported once, and an unlocked Mac.** Reads work
+  immediately and regardless; `doctor` tells you whether the write path is installed. See
+  [what works headlessly](#what-works-headlessly).
 - **macOS only.** It reads a local file; there is no iOS equivalent and there cannot be one.
 - **Unofficial.** Not affiliated with or endorsed by Algebraic Labs. The schema is internal and
   may change without notice — `doctor` is how you find out.
 - **Foods you have never logged are invisible.** This reads your library, not FoodNoms' full food
   database. Scan it once and it is queryable forever after.
+
+## Dependencies
+
+`foodnomsctl` is one file and imports only the standard library, so installing
+it is a copy and there is nothing to pin. Python 3.10 or newer; CI covers 3.10
+and 3.13.
+
+`foodnomsctl-bridge` is the one exception: regenerating the bridge Shortcut
+reads `intents.yaml`, so it needs **PyYAML** (`pip3 install pyyaml`). Nothing
+else in the tool does.
+
+Beyond Python it needs macOS — it reads a local container path, so there is no
+iOS equivalent — the `shortcuts` CLI, FoodNoms installed, and for writes the
+bridge Shortcut imported and FoodNoms running (the CLI launches it). The calling
+process needs Full Disk Access to read the container; macOS attributes that to
+the responsible process, so it is the terminal or the agent host, not the CLI.
+A launchd agent does not inherit it, which is why the queue defaults to
+`~/.local/state` rather than the iCloud spool.
 
 ## Development
 
