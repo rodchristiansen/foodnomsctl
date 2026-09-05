@@ -1,0 +1,305 @@
+#!/usr/bin/env python3
+"""foodnomsctl-relog — re-log entries as the foods they were.
+
+`foodnomsctl edit` re-logs through quick entry, which carries a name and macros
+and nothing else: the barcode, the serving measure and the link to the library
+food do not survive. That is fine for a one-off and wrong for correcting an
+entry that should stay the food it was.
+
+The reason is a hard ceiling, not an oversight. LogIntent selects its food and
+its portion through entity-typed parameters, and Shortcuts resolves an entity
+when the action is written, not when it runs — so an entity binds from a literal
+baked in at build time, or from another action's output, and never from a value
+arriving in a request. Both shapes were tried against the dispatcher bridge: the
+one an editor saves makes a plist Shortcuts refuses to import, and the one that
+imports asks the user to pick a food instead of logging one.
+
+So the food is baked in. This generates one Shortcut carrying a LogIntent per
+correction, with the food and measure written as literals, installs it and runs
+it. One Shortcut for the whole batch rather than one per entry, because
+installing does not replace and the `shortcuts` CLI cannot delete: every build
+leaves a copy behind, so there should be as few as possible.
+
+  foodnomsctl-relog <plan.json> [--name NAME] [--dry-run]
+
+The plan is a list of corrections, each naming an entry that is already in the
+log and what it should become:
+
+  [{"on": "2026-08-31", "match": "Coffee (Brewed)", "quantity": 10.5},
+   {"on": "2026-08-31", "match": "Brain Octane Oil", "quantity": 1,
+    "to_date": "2026-09-01 19:15"}]
+
+`quantity` is in whatever measure the entry already uses; `scale` is accepted
+instead. `to_date` moves it. Deletions of the originals go through the bridge,
+which does work, and happen only after the replacement Shortcut has been built.
+"""
+import argparse
+import json
+import os
+import plistlib
+import subprocess
+import sys
+import tempfile
+import uuid
+from datetime import datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CLI = os.path.join(HERE, "foodnomsctl")
+BUNDLE = "com.algebraiclabs.foodnoms"
+TEAM = "32642VZFU3"
+VERSION = "1.0"
+
+
+def cli(*args):
+    out = subprocess.run([sys.executable, CLI, *args], capture_output=True, text=True)
+    if out.returncode != 0:
+        sys.exit((out.stderr or out.stdout).strip())
+    return out.stdout
+
+
+def food_entity(name, food_id):
+    """The food as LogIntent wants it: a document naming the service and the id
+    within it, with the display name carried twice. Not the id the store reports.
+    """
+    if (food_id or "").startswith("local:"):
+        ident, service = food_id[len("local:"):], "manualEntry"
+    elif (food_id or "").startswith("foodnoms:"):
+        ident, service = food_id[len("foodnoms:"):], "foodNoms"
+    else:
+        ident, service = food_id, "foodNoms"
+    return {"title": {"key": name}, "subtitle": {"key": name},
+            "identifier": json.dumps(
+                {"value": {"foodID": {"_0": {"serviceID": ident,
+                                             "service": service}}}},
+                separators=(",", ":"))}
+
+
+def measure_entity(measure):
+    """The portion the quantity counts — the store's own measure dictionary,
+    wrapped in a `value` key. Taken off the entry being replaced, never invented,
+    so the corrected entry counts the same portion it counted before."""
+    label = measure.get("descriptionText") or measure.get("unit") or "serving"
+    return {"title": {"key": label}, "subtitle": {"key": label},
+            "identifier": json.dumps({"value": measure}, separators=(",", ":"))}
+
+
+def log_action(entry, quantity, when):
+    # An omitted parameter means its default, and supplying one the editor would
+    # have left out makes the action fail rather than log — which is why
+    # mealType, dateTimePreference and uncertainty are absent despite being
+    # declared required. useLastPortion is the exception: a quantity without it
+    # is ignored and the food's last portion is logged instead.
+    return {"WFWorkflowActionIdentifier": f"{BUNDLE}.LogIntent",
+            "WFWorkflowActionParameters": {
+                "AppIntentDescriptor": {"TeamIdentifier": TEAM,
+                                        "BundleIdentifier": BUNDLE,
+                                        "Name": "Foodnoms",
+                                        "AppIntentIdentifier": "LogIntent"},
+                "UUID": str(uuid.uuid4()).upper(),
+                "ShowWhenRun": False,
+                "type": "food",
+                "foodEntry": food_entity(entry["name"], entry.get("food_id")),
+                "quantity": f"{quantity:g}",
+                "foodMeasure": measure_entity(entry["measure"]),
+                "useLastPortion": False,
+                "date": when}}
+
+
+def resolve(plan):
+    """Match each correction to the entry it names, and work out the new
+    portion. Everything is resolved before anything is deleted, so a plan that
+    cannot be carried out fails having changed nothing."""
+    out = []
+    for item in plan:
+        # An `add` names a food in the library rather than an entry in the log:
+        # nothing is deleted, one entry appears. Half a breakfast that moved to
+        # the next day's smoothie is an add there and a scale back on the day it
+        # came from, and both belong in one plan so they are one Shortcut.
+        if item.get("add"):
+            food = json.loads(cli("resolve", item["add"], "--json"))[0]
+            measure = food.get("measure")
+            if item.get("unit"):
+                pool = [m for m in ([food.get("measure")]
+                                    + (food.get("measures") or [])) if m]
+                measure = next((m for m in pool
+                                if m.get("descriptionText") == item["unit"]), None)
+                if measure is None:
+                    have = sorted({m.get("descriptionText") or m.get("unit")
+                                   for m in pool})
+                    sys.exit(f"{food['name']} has no {item['unit']!r} measure — "
+                             f"it offers {have}")
+            if not measure:
+                sys.exit(f"{food['name']} carries no measure to log against")
+            out.append({"on": None, "to_date": item["date"],
+                        "quantity": float(item["quantity"]),
+                        "entry": {"name": food["name"],
+                                  "food_id": food["food_id"],
+                                  "barcode": food.get("barcode"),
+                                  "quantity": 0, "measure": measure,
+                                  "date": item["date"]}})
+            continue
+        on = item["on"]
+        entries = json.loads(cli("day", on, "--json"))["entries"]
+        hits = [e for e in entries
+                if item["match"].upper() == (e["entry_id"] or "").upper()
+                or item["match"].lower() in (e["name"] or "").lower()]
+        if not hits:
+            sys.exit(f"no entry matching {item['match']!r} in the log for {on}")
+        if len(hits) > 1 and not item.get("index"):
+            names = "\n".join(f"  {h['name']}  {h['entry_id']}  "
+                              f"{h['quantity']:g}" for h in hits)
+            sys.exit(f"{len(hits)} entries match {item['match']!r} on {on}:\n{names}\n"
+                     "name the entry id, or add an `index` to pick one")
+        e = hits[item.get("index", 0)]
+        if not e.get("measure"):
+            sys.exit(f"{e['name']} on {on} carries no measure, so a re-log could "
+                     "only guess the portion")
+        if "quantity" in item:
+            qty = float(item["quantity"])
+        elif "scale" in item:
+            qty = (e.get("quantity") or 0) * float(item["scale"])
+        else:
+            sys.exit(f"{item['match']!r}: give a quantity or a scale")
+        if qty <= 0:
+            sys.exit(f"{e['name']}: quantity would be {qty:g}; use `delete` instead")
+
+        out.append({"on": on, "entry": e, "quantity": qty,
+                    "to_date": item.get("to_date")})
+    return out
+
+
+def local_stamp(utc_text):
+    from datetime import timezone
+    txt = (utc_text or "")[:19].replace("T", " ")
+    try:
+        naive = datetime.strptime(txt, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return txt
+    return naive.replace(tzinfo=timezone.utc).astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S")
+
+
+def build(items, name):
+    stamp = datetime.now().strftime("%Y.%m.%d.%H%M")
+    lines = "\n".join(
+        f"  {i['entry']['name']}: "
+        + ("add " if i["on"] is None else f"{i['entry']['quantity']:g} → ")
+        + f"{i['quantity']:g}"
+        + (f"  → {i['to_date'][:10]}" if i.get("to_date") else "")
+        for i in items)
+    acts = [{"WFWorkflowActionIdentifier": "is.workflow.actions.comment",
+             "WFWorkflowActionParameters": {"WFCommentActionText":
+                 f"{name} v{stamp} — re-logs corrected entries as the foods they "
+                 f"were, generated by foodnomsctl-relog {VERSION}. One-shot: run "
+                 f"it once, then it is spent.\n\n{lines}"}}]
+    for i in items:
+        when = i["to_date"] or local_stamp(i["entry"]["date"])
+        acts.append(log_action(i["entry"], i["quantity"], when))
+    return {"WFWorkflowActions": acts,
+            "WFWorkflowClientVersion": "2700.0.4",
+            "WFWorkflowHasOutputFallback": False,
+            "WFWorkflowHasShortcutInputVariables": False,
+            "WFWorkflowIcon": {"WFWorkflowIconGlyphNumber": 59511,
+                               "WFWorkflowIconStartColor": 4292093695},
+            "WFWorkflowImportQuestions": [],
+            "WFWorkflowInputContentItemClasses": [],
+            "WFWorkflowMinimumClientVersion": 900,
+            "WFWorkflowMinimumClientVersionString": "900",
+            "WFWorkflowName": name,
+            "WFWorkflowOutputContentItemClasses": [],
+            "WFWorkflowTypes": []}
+
+
+def installed(name):
+    """Whether the library holds a Shortcut of this name.
+
+    Not `shortcuts list`, which lags: the library is a WAL-mode database and
+    both that command and a plain copy of the file read a snapshot from the last
+    checkpoint, which can be a day stale. Copying the -wal alongside it is what
+    makes a just-finished import visible. Reading a stale library is how an
+    import that worked gets reported as a failure.
+    """
+    import shutil, sqlite3
+    src = os.path.expanduser("~/Library/Shortcuts/Shortcuts.sqlite")
+    if not os.path.exists(src):
+        return False
+    tmp = tempfile.mkdtemp(prefix="fnrelog.lib.")
+    dst = os.path.join(tmp, "db.sqlite")
+    try:
+        shutil.copy2(src, dst)
+        for ext in ("-wal", "-shm"):
+            if os.path.exists(src + ext):
+                shutil.copy2(src + ext, dst + ext)
+        con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        row = con.execute("SELECT 1 FROM ZSHORTCUT WHERE ZNAME = ? LIMIT 1",
+                          (name,)).fetchone()
+        con.close()
+        return bool(row)
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="foodnomsctl-relog", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("plan")
+    ap.add_argument("--name", default="FNCTL Relog " + datetime.now().strftime("%m%d%H%M"))
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+
+    with open(a.plan) as fh:
+        plan = json.load(fh)
+    items = resolve(plan)
+
+    for i in items:
+        e, when = i["entry"], (i["to_date"] or local_stamp(i["entry"]["date"]))
+        unit = (e["measure"].get("descriptionText")
+                or e["measure"].get("unit") or "serving")
+        change = ("add" if i["on"] is None
+                  else f"{e['quantity']:g} →")
+        print(f"{e['name']}: {change} {i['quantity']:g} x {unit}"
+              f"  @ {when}  [{e.get('barcode') or e.get('food_id')}]")
+    if a.dry_run:
+        return
+
+    workflow = build(items, a.name)
+    tmp = tempfile.mkdtemp(prefix="fnrelog.")
+    raw = os.path.join(tmp, a.name + ".shortcut")
+    with open(raw, "wb") as fh:
+        plistlib.dump(workflow, fh)
+    signed = os.path.join(tmp, "signed", a.name + ".shortcut")
+    os.makedirs(os.path.dirname(signed), exist_ok=True)
+    subprocess.run(["shortcuts", "sign", "--mode", "anyone", "-i", raw,
+                    "-o", signed], check=False)
+    if not os.path.exists(signed) or os.path.getsize(signed) == 0:
+        sys.exit("signing produced no file")
+
+    # `open -a Shortcuts`, never a bare `open`: that hands the file to
+    # LaunchServices, which returns 0 having installed nothing.
+    subprocess.run(["open", "-a", "Shortcuts", signed], check=False)
+    import time
+    for _ in range(10):
+        time.sleep(2)
+        if installed(a.name):
+            break
+    else:
+        sys.exit(f'"{a.name}" did not install; nothing has been changed.')
+    print(f'built and installed "{a.name}"')
+
+    # Delete only now. Building or installing could still have failed, and an
+    # entry deleted with no replacement waiting is the one unrecoverable state
+    # here — the originals cannot be restored from anything this tool holds.
+    for i in items:
+        if i["on"] is None:
+            continue
+        subprocess.run([sys.executable, CLI, "delete", i["entry"]["entry_id"],
+                        "--on", i["on"]], check=False)
+    subprocess.run(["shortcuts", "run", a.name], check=False)
+    print(f'ran "{a.name}" — it is spent now, and deleting it is a swipe in '
+          "Shortcuts.")
+
+
+if __name__ == "__main__":
+    main()

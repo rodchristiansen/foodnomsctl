@@ -29,7 +29,7 @@
 
 bundle: com.algebraiclabs.foodnoms
 team: 32642VZFU3
-shortcut_name: FoodNomsCTL Bridge
+shortcut_name: FoodNomsCTL Bridge 3
 
 commands:
   - command: log
@@ -41,6 +41,13 @@ commands:
       requireMacros: true
     params:
       name: {type: text, required: true}
+      # `date` is optional on the intent and was long assumed absent, so every
+      # entry landed at "now" and a correction to an earlier day was impossible.
+      # It is a Date primitive, not an entity, so it binds from a run-time value
+      # like every other field here. `dateTimePreference: dateAndTime` above is
+      # what makes the intent honour both halves of what is passed; with the
+      # date omitted that same enum simply means now.
+      date: {type: text}
       energyCalories: {type: number}
       protein: {type: number}
       carbs: {type: number}
@@ -83,28 +90,50 @@ commands:
 # action", including for commands that are themselves fine.
 
   - command: delete
-    intent: DeleteLoggedFoodIntent
-    summary: Delete a logged entry, by its entry id
+    intent: GetFoodEntriesIntent
+    summary: Delete one logged entry, chosen by position in the day's entries
+    # Not DeleteLoggedFoodIntent directly. Its `foodEntries` is an entity array,
+    # and an entity does not bind from an identifier arriving at run time — that
+    # was issue 001, where the intent took the request and did nothing. Entities
+    # bind from another action's output, so the branch fetches the day, picks
+    # one, and hands that along.
+    #
+    # By index rather than by name because Shortcuts' filter actions cannot see
+    # an entity's properties. The index is not a guess: `entries` returns the
+    # same list in the same order, so the caller resolves the name against the
+    # list this branch re-fetches, and passes a position it has already checked.
+    # That indirection is load-bearing — the intent returns fewer entries than
+    # the store holds, and which it drops is undocumented.
     fixed:
-      deleteWithoutConfirmation: true
-    # KNOWN BROKEN. foodEntries is an entity array, and an entity binds fine
-    # from a literal known at build time — that is how the smoothie generator
-    # pins a food. It does NOT bind from a value arriving at run time: the
-    # intent accepts the request, returns nothing, and deletes nothing, whether
-    # the identifier is the entry UUID in either case or its row id.
-    #
-    # The fix is to stop passing an identifier at all and let Shortcuts produce
-    # the entity: GetFoodEntriesIntent for the day, filter it by name inside the
-    # shortcut, and hand DeleteLoggedFoodIntent the resulting entity array as a
-    # variable. Entity arrays do bind from another action's output.
-    #
-    # `foodnomsctl delete` reads the store back and fails loudly rather than
-    # reporting a success that did not happen.
-    entities:
-      foodEntries:
-        identifier: entryID
-        display: entryName
-        array: true
+      dayOption: onDate
+    omit_required: [mealType]
+    params:
+      date: {type: text}
+    after:
+      - {do: item, index_key: index}
+      - do: intent
+        intent: DeleteLoggedFoodIntent
+        param: foodEntries
+        fixed: {deleteWithoutConfirmation: true}
+
+  - command: entries
+    intent: GetFoodEntriesIntent
+    summary: Read one day's entries back as text — the list `delete` indexes into
+    # A read the store already answers faster, wrapped for one reason: it is the
+    # list `delete` counts positions in. The intent returns fewer entries than
+    # the store holds — a day of HidrateSpark bottle logs did not come back,
+    # while a `Water` food on another day did — so its order is not the store's
+    # and the rule is not worth guessing at. Asking for the same list the delete
+    # branch re-fetches is the only safe way to turn a name into a position.
+    fixed:
+      dayOption: onDate
+    omit_required: [mealType]
+    params:
+      date: {type: text}
+    # Without this the branch returns an empty file: the result is an entity
+    # array, and a text coercion is what makes it readable.
+    after:
+      - {do: text}
 
   - command: goal
     intent: GetGoalIntent

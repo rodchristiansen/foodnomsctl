@@ -147,6 +147,12 @@ def check_commands(commands):
             continue
         supplied = (set(c.get("fixed") or {}) | set(c.get("params") or {})
                     | set(c.get("entities") or {}))
+        # An intent can declare a parameter required and still run without it:
+        # the Shortcuts editor writes out only what the user set, so the app's
+        # own default applies. Naming such a parameter is what breaks the
+        # action. `omit_required` records that this was a decision rather than
+        # an oversight, and which parameter it was.
+        supplied |= set(c.get("omit_required") or [])
         missing = [r for r in req if r not in supplied]
         if missing:
             sys.exit(f"{c['intent']} ({name}): required parameter(s) not supplied: "
@@ -218,10 +224,66 @@ def build(manifest):
                 "WFInput": output_ref(dict_uuid, DICT_OUT)}))
             params[key] = var_token(pu, VALUE_OUT)
 
-        params["UUID"] = str(uuid.uuid4()).upper()
+        intent_uuid = str(uuid.uuid4()).upper()
+        params["UUID"] = intent_uuid
+        # Without this the action shows its own sheet and waits — the delete
+        # branch put up a confirmation modal that has to be dismissed by hand,
+        # which defeats the point of a headless write path. It is not the
+        # intent's `deleteWithoutConfirmation`, which was already set: that is
+        # FoodNoms', this one is the Shortcuts action's.
+        params["ShowWhenRun"] = False
         params["AppIntentDescriptor"] = descriptor(bundle, spec["intent"],
                                                    manifest.get("team"))
         acts.append(action(f"{bundle}.{spec['intent']}", params))
+
+        # An intent that returns entities returns nothing a caller can read: the
+        # workflow result is the entity array, and writing that to a text file
+        # produces an empty file. `after` appends actions that turn it into
+        # something legible, or feed it to a second intent — which is the only
+        # way to reach an entity-typed parameter at all, since Shortcuts binds
+        # those from another action's output but never from a string.
+        prev_uuid, prev_name = intent_uuid, spec.get("result_name", "Food Entries")
+        for step in (spec.get("after") or []):
+            su = str(uuid.uuid4()).upper()
+            if step["do"] == "count":
+                acts.append(action("is.workflow.actions.count", {
+                    "UUID": su, "WFCountType": "Items",
+                    "WFInput": output_ref(prev_uuid, prev_name)}))
+                prev_uuid, prev_name = su, "Count"
+            elif step["do"] == "text":
+                acts.append(action("is.workflow.actions.gettext", {
+                    "UUID": su, "WFTextActionText": var_token(prev_uuid, prev_name)}))
+                prev_uuid, prev_name = su, "Text"
+            elif step["do"] == "item":
+                # One entity out of the list, by position. Position rather than
+                # name because Shortcuts' filter actions do not see an entity's
+                # properties, and the caller resolves the index against the very
+                # list this action re-fetches — `entries` returns it in the same
+                # order — so the index is checked rather than assumed.
+                idx = str(uuid.uuid4()).upper()
+                acts.append(action("is.workflow.actions.getvalueforkey", {
+                    "UUID": idx, "WFDictionaryKey": step["index_key"],
+                    "WFGetDictionaryValueType": "Value",
+                    "WFInput": output_ref(dict_uuid, DICT_OUT)}))
+                acts.append(action("is.workflow.actions.getitemfromlist", {
+                    "UUID": su, "WFItemSpecifier": "Item At Index",
+                    "WFItemIndex": var_token(idx, VALUE_OUT),
+                    "WFInput": output_ref(prev_uuid, prev_name)}))
+                prev_uuid, prev_name = su, "Item from List"
+            elif step["do"] == "intent":
+                # The point of the whole chain: an entity-typed parameter is
+                # unreachable from a string but binds from another action's
+                # output. This is the only shape that can delete.
+                p2 = dict(step.get("fixed") or {})
+                p2[step["param"]] = output_ref(prev_uuid, prev_name)
+                p2["UUID"] = su
+                p2["ShowWhenRun"] = False
+                p2["AppIntentDescriptor"] = descriptor(bundle, step["intent"],
+                                                       manifest.get("team"))
+                acts.append(action(f"{bundle}.{step['intent']}", p2))
+                prev_uuid, prev_name = su, step.get("result_name", "Result")
+            else:
+                sys.exit(f"unknown `after` step: {step['do']!r}")
 
         acts.append(action("is.workflow.actions.conditional", {
             "GroupingIdentifier": group, "UUID": str(uuid.uuid4()).upper(),
@@ -259,6 +321,37 @@ def verify(workflow):
         sys.exit(f"control flow: {depth} block(s) left open")
 
 
+def library_holds(name):
+    """Whether the Shortcuts library holds one by this name.
+
+    Not `shortcuts list`. The library is a WAL-mode database and both that
+    command and a plain copy of the file read a snapshot from the last
+    checkpoint, which can be a day stale — which is how two imports that had in
+    fact succeeded were written up as a total failure to import anything.
+    Copying the -wal alongside it is what makes a just-finished import visible.
+    """
+    import shutil, sqlite3, tempfile
+    src = os.path.expanduser("~/Library/Shortcuts/Shortcuts.sqlite")
+    if not os.path.exists(src):
+        return False
+    tmp = tempfile.mkdtemp(prefix="fnbridge.lib.")
+    dst = os.path.join(tmp, "db.sqlite")
+    try:
+        shutil.copy2(src, dst)
+        for ext in ("-wal", "-shm"):
+            if os.path.exists(src + ext):
+                shutil.copy2(src + ext, dst + ext)
+        con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        row = con.execute("SELECT 1 FROM ZSHORTCUT WHERE ZNAME = ? LIMIT 1",
+                          (name,)).fetchone()
+        con.close()
+        return bool(row)
+    except Exception:
+        return False
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main():
     ap = argparse.ArgumentParser(prog="foodnomsctl-bridge", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -292,7 +385,27 @@ def main():
         if not os.path.exists(signed) or os.path.getsize(signed) == 0:
             sys.exit("signing produced no file")
         print(f"signed → {signed}")
-        subprocess.run(["open", signed], check=False)
+
+        # `open -a Shortcuts`, never a bare `open`. A bare one hands the file to
+        # LaunchServices, which returns 0 having installed nothing, and -600
+        # when Shortcuts is not already running. Naming the app is the whole
+        # difference between a silent no-op and an install.
+        subprocess.run(["open", "-a", "Shortcuts", signed], check=False)
+
+        # Importing does not replace a same-named Shortcut, it is refused, and
+        # the `shortcuts` CLI cannot delete. So a rebuild under the canonical
+        # name installs nothing and the old build keeps answering. Verify rather
+        # than assume.
+        import time
+        time.sleep(6)
+        name = manifest["shortcut_name"]
+        if library_holds(name):
+            print(f'installed → "{name}"')
+        else:
+            print(f'NOT installed: "{name}" is not in the library. If a Shortcut '
+                  "of that name is already there, the import was refused — "
+                  "publish under a different name and point FOODNOMSCTL_BRIDGE "
+                  "at it.")
 
 
 if __name__ == "__main__":
