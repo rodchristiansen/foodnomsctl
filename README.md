@@ -14,6 +14,28 @@ carries the food's service identifiers, barcode, unit, serving size and complete
 the set of things you have ever logged — with counts, with the units you actually use, with the
 brand you are actually buying — is recoverable without any API, any account, and any network.
 
+## Documentation
+
+The full guides live in the **[wiki](https://github.com/rodchristiansen/foodnomsctl/wiki)**. Start here:
+
+| | |
+|---|---|
+| **[Getting Started](https://github.com/rodchristiansen/foodnomsctl/wiki/Getting-Started)** | Install, run `doctor`, ask your first questions |
+| **[What Runs Unattended](https://github.com/rodchristiansen/foodnomsctl/wiki/What-Runs-Unattended)** | Which commands work over SSH, with the screen locked, from a phone — read this before automating anything |
+| [Reading Your Library](https://github.com/rodchristiansen/foodnomsctl/wiki/Reading-Your-Library) | `catalog`, `search`, `resolve`, `day`, `meals`, `barcodes` |
+| [Writing to FoodNoms](https://github.com/rodchristiansen/foodnomsctl/wiki/Writing-To-FoodNoms) | `log`, `create-food`, the macro rule, what a write costs |
+| [The Write Queue](https://github.com/rodchristiansen/foodnomsctl/wiki/The-Write-Queue) | Why writes are queued, the drain agent, the locked-Mac problem |
+| [Correcting the Log](https://github.com/rodchristiansen/foodnomsctl/wiki/Correcting-The-Log) | `delete`, `edit`, and when to reach for `relog` |
+| [The Bridge Shortcut](https://github.com/rodchristiansen/foodnomsctl/wiki/The-Bridge-Shortcut) | Generating, signing, installing, and naming it |
+| [Troubleshooting](https://github.com/rodchristiansen/foodnomsctl/wiki/Troubleshooting) | Every failure seen so far and what it actually meant |
+| [How It Works Inside](https://github.com/rodchristiansen/foodnomsctl/wiki/How-It-Works-Inside) | Store discovery, nutrient scaling, the local-day key |
+| [Automation Recipes](https://github.com/rodchristiansen/foodnomsctl/wiki/Automation-Recipes) | Worked `--json` pipelines for scripts and agents |
+| [Contributing](https://github.com/rodchristiansen/foodnomsctl/wiki/Contributing) | Tests, the fixture, and the house rules |
+
+The wiki is the only copy — edit it there, not in this repository. It is a git repository of its
+own (`git clone https://github.com/rodchristiansen/foodnomsctl.wiki.git`) if you would rather
+work on the pages locally.
+
 ## How It Works
 
 ```text
@@ -66,13 +88,6 @@ every "why does this return nothing".
 If `doctor` reports that it cannot open the store, the app group container is TCC-protected and
 the process running FoodNomsCTL needs Full Disk Access. That is the terminal, or the agent host,
 not the CLI itself — macOS attributes the access to the responsible process.
-
-## Guides
-
-Twelve of them, in [docs/guides](docs/guides/Home.md) — getting started, what runs unattended,
-reading the library, writing, the queue, correcting the log, the bridge Shortcut,
-troubleshooting, how it works inside, automation recipes, and contributing. This README is the
-overview; those are the depth.
 
 ## What works headlessly
 
