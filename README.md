@@ -268,7 +268,9 @@ Stated plainly, because they are structural:
   immediately and regardless; `doctor` tells you whether the write path is installed. See
   [what works headlessly](#what-works-headlessly).
 - **macOS only.** It reads a local file; there is no iOS equivalent and there cannot be one.
-- **Unofficial.** Not affiliated with or endorsed by Algebraic Labs. The schema is internal and
+- **Unofficial.** Not affiliated with or endorsed by Algebraic Labs. What would make this
+  unnecessary, or merely easier, is collected in
+  [docs/feature-requests.md](docs/feature-requests.md). The schema is internal and
   may change without notice — `doctor` is how you find out.
 - **Foods you have never logged are invisible.** This reads your library, not FoodNoms' full food
   database. Scan it once and it is queryable forever after.
