@@ -58,7 +58,10 @@ Adds the write path. Reads still go straight to SQLite; nothing ever writes the 
   generator needs to write a `foodMeasure` — the intent's measure identifier is that dictionary
   wrapped in a `value` key.
 
-## Unreleased
+## 0.5.0 — 2026-09-05
+
+The first release meant to be handed to someone else, and the one that makes the write
+path survive a locked Mac.
 
 The CLI can now correct the log, not only append to it.
 
@@ -97,3 +100,43 @@ The CLI can now correct the log, not only append to it.
 Timestamps are stored in UTC and every intent reads what it is handed as local time, so `edit`
 converts before writing back. Without it an entry moved by the UTC offset — seven hours in
 Vancouver, enough to slide a late entry onto the next day and change two days' totals.
+
+Writes are queued, and a locked screen no longer loses them.
+
+- Every write is queued to a file before it is attempted and removed only once the store
+  confirms it. Shortcuts does not run while the Mac's screen is locked — `shortcuts run` hangs
+  until it is killed and an import silently does nothing — and neither reports an error, so the
+  CLI read it as the known does-not-return case and nine backdated entries reported "submitted"
+  and wrote nothing. A locked screen is now detected up front, so `log` returns in a tenth of a
+  second with the request safe on disk.
+- `flush`, and a launchd agent (`install-agent.sh`) that runs it on an interval and on any
+  change to the queue directory, so everything queued lands within a minute of the Mac becoming
+  usable. No GUI step and nothing to re-enter.
+- The 90s wait is gone. The log intent completes the write and never hands control back, so
+  waiting for a return value was waiting for something that does not exist; nine items cost
+  thirteen minutes. Polling the store for the entry costs a couple of seconds, and the flat wait
+  survives only as the cap for a write that never appears at all.
+- Draining takes an exclusive lock and a second drainer leaves rather than waits. The agent
+  drains on an interval *and* on directory change, so a hand-started drain ran beside an
+  agent-started one, both dispatched the same request before either had landed, and nine queued
+  items became ninety entries in the log. Each request is also claimed by renaming it out of
+  `pending` before it is read: a crash leaves it claimed rather than pending, because
+  re-entering a missing meal beats unpicking a duplicated one.
+- The queue defaults to `~/.local/state/foodnomsctl/queue`, not the iCloud spool — a launchd
+  agent does not inherit the terminal's Full Disk Access and dies on `PermissionError` reading
+  anything under `~/Library/Mobile Documents`. `FOODNOMSCTL_SPOOL` points it elsewhere.
+
+It is also the first release with tests.
+
+- `doctor` matches the bridge by **exact name**. Importing never replaces one already in the
+  library, so a rebuild lands beside the old copy as "FoodNomsCTL Bridge 2" and a substring test
+  reported the write path healthy while every write failed with "Couldn't find shortcut".
+- `--version`.
+- Tests — stdlib `unittest` over a synthetic store, so they need neither FoodNoms nor your data:
+  `python3 -m unittest discover -s tests`. They cover nutrient scaling, the local-day key, id
+  matching, saved-meal exclusion and the bridge check.
+- CI on macOS and Linux, Python 3.10 and 3.13.
+- README corrected. It documented `log-weight`, `db-search` and `ask`, none of which were ever
+  implemented — 0.2.0 announced them and shipped four commands. `db-search` cannot work:
+  `SearchFoodnomsDatabaseIntent` presents the food picker and never returns. The other two are
+  untested and do not ship until they have been run.

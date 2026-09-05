@@ -119,6 +119,12 @@ foodnomsctl resolve-meal "Morning Smoothie"
 Store path, size, entry counts, whether the bridge Shortcut is installed, and a clear failure
 when the schema has moved.
 
+The bridge is matched by exact name. Importing a Shortcut never replaces one already in the
+library, so a rebuild lands beside the old copy as "FoodNomsCTL Bridge 2" — a substring test
+would call the write path healthy while every write fails. `doctor` names the near-miss.
+
+`foodnomsctl --version` prints the version.
+
 ## Writing
 
 macOS has no command that invokes another app's App Intent directly, so writes go through one
@@ -134,11 +140,28 @@ it for import — importing is a tap you make once in Shortcuts. After that:
 
 ```bash
 foodnomsctl log "Cold brew" --calories 15 --protein 1
-foodnomsctl log-weight 191.4
 foodnomsctl create-food "House Granola" --brand "Homemade" --calories 220 --protein 6
-foodnomsctl db-search "skyr"
-foodnomsctl ask "how much protein have I had today"
 foodnomsctl goal
+```
+
+`delete` and `edit` correct the log rather than only appending to it, and
+`log --date` writes to an earlier day. `delete` works by chaining
+`GetFoodEntriesIntent` into the delete rather than passing an identifier, which
+is what closed [issue 001](docs/issues/001-delete-does-not-bind-a-runtime-entity.md);
+it deletes by position in the intent's own list, which is not the store's, so it
+resolves against that list rather than inferring an index.
+
+Writes are queued before they are attempted. Shortcuts does not run while the
+Mac's screen is locked — `shortcuts run` hangs until it is killed and an import
+silently does nothing, and neither reports an error — so a write attempted then
+is lost in a way that reports success. `log` detects the lock up front and
+returns immediately with the request on disk; `flush` drains the queue, and
+`./install-agent.sh` installs a launchd agent that drains it automatically
+within a minute of the Mac becoming usable.
+
+```bash
+foodnomsctl flush
+./install-agent.sh
 ```
 
 One Shortcut rather than one per intent, because installing a suite of twelve is a chore and
@@ -147,21 +170,33 @@ hand-wired parameters — exactly the shape that rots. The branch set is data in
 rebuilding re-emits all of it, checks that no two commands collide, and verifies every
 conditional block closes.
 
-Dispatch compares the command name for **exact equality**, never "contains". A contains-match
-dispatcher is how a branch for `log` also fires for `log-weight`.
+Dispatch compares the command name for **exact equality**, never "contains" — a contains-match
+branch for `log` fires for every future command that starts with it. The same mistake, in the
+other direction, is what let `doctor` report a bridge named "FoodNomsCTL Bridge 3" as the
+bridge it runs.
 
 ### Which intents are wrapped, and why so few
 
-FoodNoms ships 45 App Intents. Nine only open UI and do nothing headless. Most of the rest are
-reads that `foodnomsctl` already answers faster and in more detail from the store — wrapping
-`GetFoodEntriesIntent` would be strictly worse than `foodnomsctl day`. So the manifest carries
-the writes the store must never perform itself, plus the two reads the local store genuinely
-cannot answer: `db-search` hits FoodNoms' *online* database rather than your log, and `ask`
-reaches FoodNoms AI.
+FoodNoms ships 45 App Intents; the manifest wraps five. Nine only open UI and do nothing
+headless. Most of the rest are reads that `foodnomsctl` already answers faster and in more
+detail from the store — wrapping `GetFoodEntriesIntent` would be strictly worse than
+`foodnomsctl day`. So what is left is the writes the store must never perform itself, plus `goal`,
+which is state the log does not hold, and `entries`, which is the list `delete`
+counts positions in — the intent omits water and drink entries, so its order is
+not the store's and has to be observed rather than assumed.
 
 Entity-typed parameters — `mealType`, `foodMeasure`, `favorite` — are not exposed. Shortcuts
 resolves an entity through picker UI with no headless equivalent. That is the ceiling of this
 approach, and the reason `log` takes a quick entry rather than a library reference.
+
+Two intents that would be genuinely useful are deliberately absent, because the local store
+cannot answer what they answer and neither is proven to run headlessly.
+`SearchFoodnomsDatabaseIntent` reaches FoodNoms' *online* database and presents the food
+picker, so `shortcuts run` never returns — that one is settled, and it cannot be wrapped.
+`AskFoodnomsAIIntent` and `LogWeightIntent` are untested here; the first declares a required
+entity-typed `mealType` and a `logImmediately` flag, which is the shape that tends not to bind.
+Neither ships until it has been run. See [docs/app-intents.md](docs/app-intents.md) for how that
+gets established.
 
 ## Why This Exists
 
@@ -194,6 +229,21 @@ Stated plainly, because they are structural:
   may change without notice — `doctor` is how you find out.
 - **Foods you have never logged are invisible.** This reads your library, not FoodNoms' full food
   database. Scan it once and it is queryable forever after.
+
+## Development
+
+One file, no third-party dependencies, stdlib `unittest`. The tests run against a synthetic
+store built by `tests/fixture.py`, so they need neither FoodNoms nor your data:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+What they cover is the arithmetic and the matching — the places where a wrong answer looks like
+a right one. Nutrient scaling by the calorie ratio (a tablespoon of a per-100g food is not a
+hundred grams), the local-day key against a value read out of a live store, id matching on a
+colon boundary, saved-meal components excluded from a day's totals, and the exact-name bridge
+check.
 
 ## Related
 

@@ -45,6 +45,8 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 
+__version__ = "0.5.0"
+
 BUNDLE = "com.algebraiclabs.foodnoms"
 # Importing a Shortcut does not replace a same-named one already in the library
 # — it is refused outright, so a rebuilt bridge cannot be installed over the old
@@ -458,6 +460,19 @@ def call_bridge(command, timeout=90, **params):
     return out
 
 
+def bridge_installed(listing, bridge=BRIDGE):
+    """Whether `shortcuts list` output contains the bridge, by exact name.
+
+    Exact equality, never a substring. Installing a Shortcut does not replace an
+    existing one of the same name — you get "FoodNomsCTL Bridge 2" beside it —
+    so a substring test reports the write path healthy while `shortcuts run`
+    fails on a name that is not there. Returns the near-misses too, because that
+    is the case worth naming in the diagnosis.
+    """
+    names = [ln.strip() for ln in (listing or "").splitlines() if ln.strip()]
+    return bridge in names, [n for n in names if n != bridge and n.startswith(bridge)]
+
+
 def doctor():
     print("foodnomsctl doctor\n")
     store = find_store()
@@ -488,11 +503,16 @@ def doctor():
     print(f"  [OK]   {saved} saved meals")
 
     installed = subprocess.run(["shortcuts", "list"], capture_output=True, text=True)
-    if BRIDGE in (installed.stdout or ""):
+    present, near = bridge_installed(installed.stdout)
+    if present:
         print(f'  [OK]   write path: "{BRIDGE}" installed')
     else:
         print(f'  [WARN] write path: "{BRIDGE}" not installed — reads work, writes')
         print("         will fail. Build and import it: ./foodnomsctl-bridge --publish")
+        for n in near:
+            print(f'  [note] "{n}" is in the library but is not the name the CLI runs.')
+            print("         Importing never replaces, so a rebuild lands beside the old")
+            print("         copy under a new name. Delete it and re-import.")
     return 0
 
 
@@ -712,6 +732,8 @@ def main():
     ap = argparse.ArgumentParser(prog="foodnomsctl", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--version", action="version",
+                    version=f"foodnomsctl {__version__}")
     jsonopt = argparse.ArgumentParser(add_help=False)
     # SUPPRESS, not the default False: a subparser applies its own defaults over
     # the namespace, so a plain store_true here silently un-sets a --json given
