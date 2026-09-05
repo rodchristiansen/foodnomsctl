@@ -67,6 +67,13 @@ If `doctor` reports that it cannot open the store, the app group container is TC
 the process running FoodNomsCTL needs Full Disk Access. That is the terminal, or the agent host,
 not the CLI itself — macOS attributes the access to the responsible process.
 
+## Guides
+
+Twelve of them, in [docs/guides](docs/guides/Home.md) — getting started, what runs unattended,
+reading the library, writing, the queue, correcting the log, the bridge Shortcut,
+troubleshooting, how it works inside, automation recipes, and contributing. This README is the
+overview; those are the depth.
+
 ## What works headlessly
 
 Verified against a live 16,495-entry store, not inferred from the metadata.
