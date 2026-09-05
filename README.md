@@ -18,7 +18,7 @@ brand you are actually buying — is recoverable without any API, any account, a
 
 The full guides live in the **[wiki](https://github.com/rodchristiansen/foodnomsctl/wiki)**. Start here:
 
-| | |
+| Guide | What it covers |
 |---|---|
 | **[Getting Started](https://github.com/rodchristiansen/foodnomsctl/wiki/Getting-Started)** | Install, run `doctor`, ask your first questions |
 | **[What Runs Unattended](https://github.com/rodchristiansen/foodnomsctl/wiki/What-Runs-Unattended)** | Which commands work over SSH, with the screen locked, from a phone — read this before automating anything |
