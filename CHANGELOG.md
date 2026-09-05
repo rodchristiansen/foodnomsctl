@@ -126,6 +126,17 @@ Writes are queued, and a locked screen no longer loses them.
   agent does not inherit the terminal's Full Disk Access and dies on `PermissionError` reading
   anything under `~/Library/Mobile Documents`. `FOODNOMSCTL_SPOOL` points it elsewhere.
 
+`log` refuses a write that would stop and ask. `requireMacros` is set on
+`LogQuickEntryIntent`, and FoodNoms does not fail when one of the four it requires — calories,
+protein, carbs, fat — is missing: it puts up its own prompt ("How much total fat?") and waits,
+which on a headless run is a hang rather than an error. The command now names the missing flags
+up front. Fiber, sugars and sodium are genuinely optional.
+
+Verifying a write settles before giving up. FoodNoms commits through its own WAL and the
+snapshot read here can be a beat behind it, so a write that had in fact landed read as missing,
+the request stayed pending, the agent retried it, and the entry was logged twice ten seconds
+apart. A missing entry is cheap to re-check; a duplicate costs a manual delete.
+
 It is also the first release with tests.
 
 - `doctor` matches the bridge by **exact name**. Importing never replaces one already in the
@@ -140,3 +151,12 @@ It is also the first release with tests.
   implemented — 0.2.0 announced them and shipped four commands. `db-search` cannot work:
   `SearchFoodnomsDatabaseIntent` presents the food picker and never returns. The other two are
   untested and do not ship until they have been run.
+
+Documentation moved to the [wiki](https://github.com/rodchristiansen/foodnomsctl/wiki) — twelve
+guides, with the table of contents first in the README. The one that matters most is What Runs
+Unattended: it separates the reads that need nothing but the file from the writes that need an
+unlocked GUI session, with every number measured against a live library rather than inferred
+from Apple's metadata.
+
+`docs/feature-requests.md` collects what only FoodNoms can fix, so the workarounds here are not
+mistaken for the way things have to be.
