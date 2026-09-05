@@ -69,10 +69,16 @@ not the CLI itself — macOS attributes the access to the responsible process.
 
 ## Guides
 
-Twelve of them, in [docs/guides](docs/guides/Home.md) — getting started, what runs unattended,
+Twelve of them, in the [wiki](https://github.com/rodchristiansen/foodnomsctl/wiki) — getting
+started, [what runs unattended](https://github.com/rodchristiansen/foodnomsctl/wiki/What-Runs-Unattended),
 reading the library, writing, the queue, correcting the log, the bridge Shortcut,
-troubleshooting, how it works inside, automation recipes, and contributing. This README is the
-overview; those are the depth.
+[troubleshooting](https://github.com/rodchristiansen/foodnomsctl/wiki/Troubleshooting), how it
+works inside, automation recipes, and contributing. This README is the overview; those are the
+depth.
+
+The wiki is the only copy — edit it there, not in this repository. It is a git repository of its
+own (`git clone https://github.com/rodchristiansen/foodnomsctl.wiki.git`) if you would rather
+work on the pages locally.
 
 ## What works headlessly
 
