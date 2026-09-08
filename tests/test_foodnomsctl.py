@@ -337,8 +337,12 @@ class TestFolderIdentifiers(unittest.TestCase):
                            [("ZZ Filer 0", "00000000-0000-4000-8000-000000000000")])
         acts = w["WFWorkflowActions"]
         move = acts[1]["WFWorkflowActionParameters"]
-        self.assertEqual(move["folder"], {"identifier": "24C2199D-AFF4-44F8-935A-AA54194CDA47",
-                                          "displayString": "Nutrition"})
+        # The editor's own shape for a picked folder: title/subtitle keys and the
+        # bare collection UUID. The displayString envelope falls through to the
+        # picker even with the right UUID.
+        self.assertEqual(move["folder"], {"title": {"key": "Nutrition"},
+                                          "subtitle": {"key": "Nutrition"},
+                                          "identifier": "24C2199D-AFF4-44F8-935A-AA54194CDA47"})
         self.assertEqual(move["shortcuts"][0]["identifier"], "2D6D9DB2-DB7B-4B87-BE89-CD1469938158")
         self.assertFalse(move["ShowWhenRun"])
         self.assertEqual(acts[2]["WFWorkflowActionIdentifier"], "com.apple.shortcuts.DeleteWorkflowAction")
