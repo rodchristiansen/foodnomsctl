@@ -725,7 +725,7 @@ def dispatch(command, params, settle=45):
             json.dump(payload, fh)
         proc = subprocess.Popen(["shortcuts", "run", BRIDGE, "-i", req, "-o", res],
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True)
+                                stdin=subprocess.DEVNULL, text=True)
         deadline = time.monotonic() + settle
         while time.monotonic() < deadline:
             if proc.poll() is not None:

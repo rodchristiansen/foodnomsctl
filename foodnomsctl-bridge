@@ -611,7 +611,8 @@ def file_bridge(bridge_name, folder_name):
                 "Shortcuts editor window, a locked screen, or a freshly relaunched "
                 "Shortcuts all swallow imports silently; retry in a minute.")
     try:
-        subprocess.run(["shortcuts", "run", name], capture_output=True, text=True, timeout=30)
+        subprocess.run(["shortcuts", "run", name], capture_output=True, text=True, timeout=30,
+                       stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         subprocess.run(["pkill", "-f", f"shortcuts run {name}"], capture_output=True)
         return f'"{name}" ran but did not return — a picker may be up, which means the folder did not bind'
