@@ -378,3 +378,37 @@ class TestCreateFoodPanel(unittest.TestCase):
         for key in ("vitaminD", "vitaminK", "biotin", "zinc", "copper", "magnesium",
                     "molybdenum", "fatPolyunsaturated"):
             self.assertIn(key, dests)
+
+
+class TestLibraryOnlyFoods(StoreTest):
+    """A food saved to the library but never logged is still findable.
+
+    `create-food` leaves exactly this behind, and a script that creates a food
+    and then cannot resolve it is worse than one that never created it.
+    """
+
+    def test_it_appears_in_the_catalog(self):
+        names = {f["name"] for f in fn.catalog(self.con)}
+        self.assertIn("Unlogged Supplement", names)
+
+    def test_search_finds_it_with_no_logged_history(self):
+        hits = fn.search(self.con, "unlogged supplement")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["food_id"],
+                         "local:99999999-9999-4999-8999-999999999999")
+        self.assertEqual(hits[0]["calories"], 0)
+        self.assertEqual(hits[0]["count"], 0)
+        self.assertIsNone(hits[0]["last_logged"])
+
+    def test_a_logged_food_is_not_duplicated_by_its_library_row(self):
+        names = [f["name"] for f in fn.catalog(self.con)]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_it_carries_a_measure_an_action_can_send(self):
+        hit = fn.search(self.con, "unlogged supplement")[0]
+        self.assertEqual(hit["measure"]["unit"], "serving")
+        self.assertEqual(hit["unit"], "serving")
+
+    def test_a_min_count_excludes_it(self):
+        names = {f["name"] for f in fn.catalog(self.con, min_count=2)}
+        self.assertNotIn("Unlogged Supplement", names)
