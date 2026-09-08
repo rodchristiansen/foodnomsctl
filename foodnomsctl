@@ -378,18 +378,25 @@ def julian_day(when):
     return (d - date(1970, 1, 1)).days + UNIX_EPOCH_JD
 
 
-def day(con, when):
+def day(con, when, components=False):
     """A day's log. Entries belonging to a saved meal or recipe are excluded —
     they are components of a stored item, not separate things eaten.
+
+    `components=True` includes them, which is what a caller checking whether a
+    write landed needs: logging a saved Meal writes one row per item and not a
+    single row named after the meal, so the default view shows nothing at all
+    and the write looks like it failed. Totals are then the same food counted
+    twice over, so they are only meaningful in the default view.
 
     Filtered on the `day` column, not on `date`. Dates are stored in UTC, so an
     evening entry in Vancouver lands on the following UTC date; a date-range
     window would take yesterday evening and drop this evening. The `day` column
     is the app's own local-day key and is what the log screen groups by.
     """
+    scope = "" if components else " AND collectionEditID IS NULL"
     rows = con.execute(f"""
       SELECT {ENTRY_COLS} FROM foodEntryRecord
-      WHERE day = ? AND collectionEditID IS NULL
+      WHERE day = ?{scope}
       ORDER BY date
     """, (julian_day(when),)).fetchall()
     entries = []
@@ -397,6 +404,10 @@ def day(con, when):
         d = as_food(r)
         d["date"] = r["date"]
         entries.append(d)
+    if components:
+        # A meal's items and the meal itself would both be counted, so there is
+        # no honest total to give.
+        return {"date": when, "totals": None, "entries": entries}
     totals = {k: round(sum(e.get(k) or 0 for e in entries), 1)
               for k in ("calories", "protein", "carbs", "fat", "fiber", "sugars", "sodium")}
     return {"date": when, "totals": totals, "entries": entries}
@@ -935,6 +946,11 @@ def main():
     s = sub.add_parser("search"); s.add_argument("term")
     r = sub.add_parser("resolve"); r.add_argument("term")
     d = sub.add_parser("day"); d.add_argument("when", nargs="?", default=date.today().isoformat())
+    d.add_argument("--components", action="store_true",
+                   help="include the items of saved meals and recipes. Logging a "
+                        "meal writes one row per item and none named after the "
+                        "meal, so this is how to see that such a write landed. "
+                        "Totals double-count with it on, and are omitted.")
     m = sub.add_parser("meals"); m.add_argument("name", nargs="?")
     rm = sub.add_parser("resolve-meal"); rm.add_argument("name")
     sub.add_parser("doctor")
@@ -1209,12 +1225,16 @@ def main():
             print(f"      {f['food_id']}"
                   + (f"  barcode {f['barcode']}" if f.get("barcode") else ""))
     elif a.cmd == "day":
-        res = day(con, a.when)
+        res = day(con, a.when, components=a.components)
         if a.json:
             print(json.dumps(res, indent=2)); return
         t = res["totals"]
-        print(f"{res['date']}  —  {t['calories']:.0f} kcal · {t['protein']:.0f}g protein "
-              f"· {t['carbs']:.0f}g carbs · {t['fat']:.0f}g fat")
+        if t:
+            print(f"{res['date']}  —  {t['calories']:.0f} kcal · {t['protein']:.0f}g protein "
+                  f"· {t['carbs']:.0f}g carbs · {t['fat']:.0f}g fat")
+        else:
+            print(f"{res['date']}  —  {len(res['entries'])} entries, meal and recipe "
+                  "items included (no totals: they would double-count)")
         for e in res["entries"]:
             print(fmt_food(e, "  "))
     elif a.cmd == "resolve-meal":

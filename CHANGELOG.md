@@ -163,6 +163,11 @@ mistaken for the way things have to be.
 
 ## Unreleased
 
+- `day --components` includes the items of saved meals and recipes. Logging a saved Meal
+  writes one row per item and none named after the meal, so the default view showed nothing
+  and a caller checking whether the write landed concluded it had failed. Totals are
+  withheld with the flag on, because a meal and its items would both be counted.
+
 - `search` and `resolve` now see foods saved to the library that have never been logged.
   The log is the library for anything scanned, but `create-food` writes a food nothing has
   eaten yet, so a script could create a food and then fail to find it — which is exactly

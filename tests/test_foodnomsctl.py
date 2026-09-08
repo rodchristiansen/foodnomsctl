@@ -412,3 +412,25 @@ class TestLibraryOnlyFoods(StoreTest):
     def test_a_min_count_excludes_it(self):
         names = {f["name"] for f in fn.catalog(self.con, min_count=2)}
         self.assertNotIn("Unlogged Supplement", names)
+
+
+class TestDayComponents(StoreTest):
+    """`day --components` shows what actually hit the log.
+
+    Logging a saved Meal writes one row per item and none named after the
+    meal, so the default view — which hides components — shows nothing, and a
+    caller checking whether the write landed concludes it failed.
+    """
+
+    def test_components_are_hidden_by_default(self):
+        names = {e["name"] for e in fn.day(self.con, "2026-09-05")["entries"]}
+        self.assertNotIn("Oat Milk", names)
+
+    def test_components_can_be_asked_for(self):
+        names = {e["name"] for e in
+                 fn.day(self.con, "2026-09-05", components=True)["entries"]}
+        self.assertIn("Oat Milk", names)
+
+    def test_totals_are_withheld_when_components_are_included(self):
+        self.assertIsNone(fn.day(self.con, "2026-09-05", components=True)["totals"])
+        self.assertIsNotNone(fn.day(self.con, "2026-09-05")["totals"])
