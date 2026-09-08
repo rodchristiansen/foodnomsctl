@@ -965,7 +965,9 @@ def main():
                          "in what the intent returns for that day, so there is no "
                          "position to delete. Delete it in FoodNoms.")
             targets.append((matches.pop(0), h))
-        for idx, h in sorted(targets, reverse=True):
+        # Sort on the index alone: a tuple sort falls through to comparing the
+        # entry dicts when two targets share an index, and dicts do not order.
+        for idx, h in sorted(targets, key=lambda t: t[0], reverse=True):
             call_bridge("delete", date=when, index=idx + 1)
             still = [e for e in day(connect(), a.on)["entries"]
                      if e["entry_id"] == h["entry_id"]]
