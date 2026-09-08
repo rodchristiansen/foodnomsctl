@@ -104,16 +104,18 @@ Mac's screen is locked. Every one takes `--json`.
 | `search` · `resolve` | 0.4s |
 | `day` · `meals` · `resolve-meal` · `barcodes` | 0.1s |
 
-**Writes need an unlocked GUI session.** They dispatch App Intents through a
-Shortcut, and Shortcuts does not run while the screen is locked: `shortcuts run`
-hangs until it is killed and an import silently does nothing, neither reporting
-an error. That is not a bug this tool can fix — it is what the only supported
-write path costs. What it does instead is refuse to lose the write: every one is
-queued to a file first, `log` returns in about a tenth of a second with the
-request safely on disk, and `flush` — or the launchd agent from
-`./install-agent.sh` — drains the queue within a minute of the Mac becoming
-usable. With the screen unlocked, `log` completes in about 1.3s and `goal` in
-about 3s.
+**Writes run with the screen locked.** They dispatch App Intents through a
+Shortcut, and `shortcuts run` executes while the Mac is locked — verified with
+the lock state read before, between and after runs. `log` completes in about a
+second either way. What needs the screen is *importing* a Shortcut: each
+signed file opens a preview that must be confirmed, so `--publish` is an
+unlocked-Mac operation; the generator confirms the preview itself via
+Accessibility. Every write is still queued to a file before it is attempted,
+so a write that does not land stays pending for `flush` or the launchd agent.
+
+Two things look exactly like "locked blocks runs" and are not: `shortcuts run`
+with no `-i` reads stdin to EOF before it starts, so under an agent harness it
+never begins; and a shortcut that shows its result blocks until someone clicks.
 
 **`log` requires all four core macros.** `requireMacros` is set on
 `LogQuickEntryIntent`, and FoodNoms does not fail when one is missing — it puts

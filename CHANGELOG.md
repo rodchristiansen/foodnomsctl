@@ -160,3 +160,12 @@ from Apple's metadata.
 
 `docs/feature-requests.md` collects what only FoodNoms can fix, so the workarounds here are not
 mistaken for the way things have to be.
+
+## Unreleased
+
+- Writes no longer wait for the screen to be unlocked. Shortcuts runs while the
+  Mac is locked — verified with the lock state read before, between and after
+  runs — so `log` dispatches immediately and the queue is only the safety net.
+  What had looked like "locked blocks runs" was `shortcuts run` reading stdin
+  to EOF when given no `-i`, a shortcut showing its result in a dialog, and a
+  picker left pending by an earlier run. Importing still needs the screen.
