@@ -226,6 +226,54 @@ class TestRequiredMacros(unittest.TestCase):
             {"energyCalories": 560, "protein": 18, "carbs": 48, "fat": 34}), [])
 
 
+class TestBridgeVersioning(unittest.TestCase):
+    """Picking the bridge to dispatch through.
+
+    Builds are stamped because importing never replaces a same-named Shortcut,
+    so a rebuild under a fixed name leaves the old actions answering.
+    """
+
+    def pick(self, names, env=None):
+        real_names, real_env = fn.library_names, os.environ.get("FOODNOMSCTL_BRIDGE")
+        fn.library_names = lambda: names
+        if env: os.environ["FOODNOMSCTL_BRIDGE"] = env
+        else: os.environ.pop("FOODNOMSCTL_BRIDGE", None)
+        try:
+            return fn.find_bridge()
+        finally:
+            fn.library_names = real_names
+            if real_env is not None: os.environ["FOODNOMSCTL_BRIDGE"] = real_env
+            else: os.environ.pop("FOODNOMSCTL_BRIDGE", None)
+
+    def test_newest_stamp_wins(self):
+        self.assertEqual(self.pick([
+            "Log Water",
+            "FoodNomsCTL Bridge 2026.09.07.0900",
+            "FoodNomsCTL Bridge 2026.09.07.1729",
+            "FoodNomsCTL Bridge 2026.08.30.2201",
+        ]), "FoodNomsCTL Bridge 2026.09.07.1729")
+
+    def test_stamps_sort_by_time_not_string_length(self):
+        self.assertEqual(self.pick([
+            "FoodNomsCTL Bridge 2026.09.07.0900",
+            "FoodNomsCTL Bridge 2026.10.01.0001",
+        ]), "FoodNomsCTL Bridge 2026.10.01.0001")
+
+    def test_a_stamped_build_beats_an_unstamped_one(self):
+        self.assertEqual(self.pick([
+            "FoodNomsCTL Bridge 3",
+            "FoodNomsCTL Bridge 2026.09.07.1729",
+        ]), "FoodNomsCTL Bridge 2026.09.07.1729")
+
+    def test_falls_back_to_a_legacy_name(self):
+        self.assertEqual(self.pick(["FoodNomsCTL Bridge 3"]),
+                         "FoodNomsCTL Bridge 3")
+
+    def test_the_env_override_wins_over_everything(self):
+        self.assertEqual(self.pick(["FoodNomsCTL Bridge 2026.09.07.1729"],
+                                   env="Some Other Bridge"), "Some Other Bridge")
+
+
 class TestStoreDiscovery(unittest.TestCase):
     def test_the_abandoned_stores_are_named_so_they_can_be_ruled_out(self):
         # Both are still on disk on any machine that has run FoodNoms for long

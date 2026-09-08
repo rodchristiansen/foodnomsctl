@@ -275,6 +275,17 @@ def build(manifest):
                 # unreachable from a string but binds from another action's
                 # output. This is the only shape that can delete.
                 p2 = dict(step.get("fixed") or {})
+                # A chained intent may need the request's own fields too, not
+                # just the entity it is being handed: logging with a meal type
+                # is GetMealType -> pick one -> Log, and the Log is where the
+                # food and its macros go.
+                for key in (step.get("params") or []):
+                    ku = str(uuid.uuid4()).upper()
+                    acts.append(action("is.workflow.actions.getvalueforkey", {
+                        "UUID": ku, "WFDictionaryKey": key,
+                        "WFGetDictionaryValueType": "Value",
+                        "WFInput": output_ref(dict_uuid, DICT_OUT)}))
+                    p2[key] = var_token(ku, VALUE_OUT)
                 p2[step["param"]] = output_ref(prev_uuid, prev_name)
                 p2["UUID"] = su
                 p2["ShowWhenRun"] = False
@@ -357,11 +368,23 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", default=os.path.join(HERE, "intents.yaml"))
     ap.add_argument("--out", default=os.path.join(HERE, "FoodNomsCTL Bridge.xml"))
+    ap.add_argument("--name", help="override the stamped Shortcut name")
     ap.add_argument("--publish", action="store_true",
                     help="also sign it and open it so Shortcuts imports it")
     a = ap.parse_args()
 
     manifest = load_manifest(a.manifest)
+    # Stamp every build. Importing never replaces a same-named Shortcut — it is
+    # refused, or lands beside the old one — and the `shortcuts` CLI cannot
+    # delete, so a fixed name means a rebuild silently keeps answering with the
+    # old actions. A stamped name makes an upgrade just a rebuild, and the CLI
+    # dispatches to the highest stamp it can see.
+    if not a.name:
+        manifest["shortcut_name"] = (
+            f"{manifest['shortcut_name'].rstrip('0123456789 ')} "
+            f"{datetime.now():%Y.%m.%d.%H%M}")
+    else:
+        manifest["shortcut_name"] = a.name
     workflow = build(manifest)
     verify(workflow)
 
