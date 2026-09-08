@@ -200,7 +200,7 @@ def nutrients(row):
 
 def measure_of(row):
     try:
-        m = json.loads(row["measure"] or "{}")
+        m = json.loads(row["measure"] or "{}") or {}
     except (ValueError, TypeError):
         m = {}
     return m.get("unit") or row["baseUnit"], m.get("value")
@@ -298,6 +298,47 @@ def catalog(con, min_count=1, since=None):
         d = as_food(r)
         d["count"] = r["cnt"]
         d["last_logged"] = r["last_logged"]
+        out.append(d)
+    if not since and min_count <= 1:
+        # Both filters ask about logged history, which a food that has never
+        # been logged cannot answer: a `since` window has no date to fall in,
+        # and "logged at least twice" excludes it by definition.
+        out += library_only(con, {f["food_id"] for f in out if f["food_id"]})
+    return out
+
+
+def library_only(con, known):
+    """Foods saved to the library that have never been logged.
+
+    The log is the library for anything scanned — an entry carries the food's
+    whole description — but `create-food` writes a food nothing has eaten yet,
+    and until now those were invisible to `search` and `resolve`. So a script
+    could create a food and then fail to find it, which is exactly what a
+    supplement stack does: create nine, then pin a Shortcut to them.
+
+    A library row has no entry, so there is no quantity, no measure chosen and
+    no date; `count` is 0 and `last_logged` is None, which sorts them below
+    anything with history under the frequent-first preference callers use.
+    """
+    rows = con.execute("""
+      SELECT NULL AS entryID, name, brandOwner, barcode, foodID, baseUnit, baseAmount,
+             NULL AS measure, measures, NULL AS quantity, nutrients, NULL AS calories,
+             NULL AS date, NULL AS mealTypeID
+      FROM foodRecord WHERE name IS NOT NULL AND COALESCE(isHidden, 0) = 0
+    """).fetchall()
+    out = []
+    for r in rows:
+        if r["foodID"] in known:
+            continue
+        d = as_food(r)
+        # The first measure the food offers stands in for the one an entry
+        # would have picked, so a generated action has a measure to send.
+        d["measure"] = (d["measures"] or [None])[0]
+        if d["measure"]:
+            d["unit"] = d["measure"].get("unit") or d["unit"]
+            d["unit_quantity"] = d["measure"].get("value")
+        d["count"] = 0
+        d["last_logged"] = None
         out.append(d)
     return out
 

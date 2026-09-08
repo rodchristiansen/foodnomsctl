@@ -33,6 +33,10 @@ CREATE TABLE foodEntryRecord (
   measure BLOB, quantity DOUBLE, mealTypeID TEXT, foodID TEXT, barcode TEXT,
   name TEXT, brandOwner TEXT, baseUnit TEXT, baseAmount DOUBLE,
   measures BLOB, nutrients BLOB, calories DOUBLE);
+CREATE TABLE foodRecord (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, foodID TEXT, barcode TEXT, name TEXT,
+  brandOwner TEXT, baseUnit TEXT, baseAmount DOUBLE, measures BLOB,
+  nutrients BLOB, isHidden INTEGER, dateCreated DATETIME);
 CREATE TABLE foodCollectionRecord (
   id INTEGER PRIMARY KEY AUTOINCREMENT, collectionID TEXT, collectionEditID TEXT,
   name TEXT, collectionType INTEGER);
@@ -110,6 +114,16 @@ def build(path):
         cols = ",".join(r)
         con.execute(f"INSERT INTO foodEntryRecord ({cols}) "
                     f"VALUES ({','.join('?' * len(r))})", list(r.values()))
+    # A food saved to the library that has never been logged — what
+    # `create-food` leaves behind. It has no entry, so it appears in the
+    # catalog only through library_only().
+    con.execute(
+        "INSERT INTO foodRecord (foodID, name, brandOwner, baseUnit, baseAmount, "
+        "measures, nutrients) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("local:99999999-9999-4999-8999-999999999999", "Unlogged Supplement",
+         "Testworks", "serving", 1.0,
+         json.dumps([measure("serving", 1, "capsule")]),
+         json.dumps({"calories": 0, "zinc": 50})))
     con.executemany(
         "INSERT INTO foodCollectionRecord "
         "(collectionID, collectionEditID, name, collectionType) VALUES (?,?,?,?)",

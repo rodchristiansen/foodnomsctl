@@ -163,6 +163,13 @@ mistaken for the way things have to be.
 
 ## Unreleased
 
+- `search` and `resolve` now see foods saved to the library that have never been logged.
+  The log is the library for anything scanned, but `create-food` writes a food nothing has
+  eaten yet, so a script could create a food and then fail to find it — which is exactly
+  what building a supplement stack does. Library-only foods carry `count: 0` and no
+  `last_logged`, and are excluded from `--since` windows and `--min-count` above 1, both
+  of which ask about logged history.
+
 - `create-food` takes the whole nutrient panel `CreateFoodIntent` accepts — saturated,
   trans, mono- and polyunsaturated fat, cholesterol, sodium, fiber, sugars, added sugars,
   sugar alcohols, net carbs, caffeine, every vitamin, and every mineral — plus
