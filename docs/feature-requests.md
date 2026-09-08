@@ -63,7 +63,27 @@ online database from a script.
 
 **Ask:** a variant that returns matches as data rather than resolving one interactively.
 
+### The meal type is reachable only by chaining
+
+`mealType` on `LogQuickEntryIntent` and `LogIntent` is entity-typed, so a script cannot say
+"lunch": it has to call `GetMealTypeIntent` with `scope: allMealTypes`, take an item by
+position, and hand that to the log. That works — and `allMealTypes` returning the list with no
+picker is exactly right — but the position has to be read out of `mealTypeRecord.sortIndex`,
+and a wrong index files food under the wrong meal rather than failing. Omit the parameter and
+the app picks one itself, which is how nine lunch items landed in Snack.
+
+**Ask:** accept the meal type as a plain enum or by name alongside the entity, the way
+`dateTimePreference` and `uncertainty` already are.
+
 ## Intents that work but are awkward to use correctly
+
+### The log intents return nothing a caller can use
+
+Even when they return, there is no entry identifier in the result, so the only way to confirm
+a write is to poll the database for a matching name, and the only way to correct it afterwards
+is to delete by position. Both are where the duplicated and mis-filed entries came from.
+
+**Ask:** return the created entry — its identifier at minimum — from every intent that writes.
 
 ### `DeleteLoggedFoodIntent` cannot be given an entry id
 
@@ -102,6 +122,10 @@ Recorded so they are not mistaken for app bugs.
   "Please choose a value for each parameter in this action" — including for commands that are
   themselves fine. It is why speculative intents cannot simply be added to the bridge and left
   unused.
+- **An App Intents entity literal is `title`/`subtitle`/`identifier`.** The
+  `identifier`/`displayString` envelope that Shortcuts' own entities accept does not bind a
+  third-party entity; nothing in the metadata says so. That is Apple's serialization, not the
+  app's — but it is why a FoodNoms food, meal or measure has to be written in that exact shape.
 - **Shortcuts does not run while the screen is locked**, and an import is not silent: it puts up
   an "Add Shortcut" preview that has to be confirmed. See `app-intents.md` for confirming it
   headlessly.
@@ -117,3 +141,13 @@ sandbox container. Both earlier stores are still on disk, still populated, and s
 queries — stopping in 2022 and 2025 respectively — so anything reading the store has to discover
 the live one rather than hardcode a path. Not a request, but a migration worth knowing others
 have tripped over.
+
+## What already works well, and should stay that way
+
+Worth saying so the asks above do not read as a complaint. `GetMealTypeIntent` with
+`scope: allMealTypes` returns every meal type with no UI, which is what makes filing by meal
+possible at all. `LogQuickEntryIntent`'s `date` binds from a plain value, so back-dating works.
+`DeleteLoggedFoodIntent` binds its entities from another action's output, so deletion is
+possible even without an id. And the database is denormalized: every entry carries its food's
+name, barcode, unit, measure and full nutrition, which is why a scriptable read surface exists
+here without any API.
