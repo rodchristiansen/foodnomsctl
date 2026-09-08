@@ -183,6 +183,13 @@ foodnomsctl resolve-meal "Morning Smoothie"
 Store path, size, entry counts, whether the bridge Shortcut is installed, and a clear failure
 when the schema has moved.
 
+Every build files itself into the Shortcuts folder named by `folder:` in `intents.yaml`
+(`Nutrition` here) and confirms its own import preview, so `--publish` is one command with
+nothing to click. That needs the shell to have Accessibility as well as Full Disk Access — the
+preview is confirmed with a keystroke, and the folder literal was learned by driving the editor.
+`--folders` prints every folder the library exposes; `--file <bridge>` files an installed bridge
+on its own; `--no-folder` skips it.
+
 The bridge is matched by exact name. Importing a Shortcut never replaces one already in the
 library, so a rebuild lands beside the old copy as "FoodNomsCTL Bridge 2" — a substring test
 would call the write path healthy while every write fails. `doctor` names the near-miss.
