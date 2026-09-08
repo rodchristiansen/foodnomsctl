@@ -521,7 +521,15 @@ def build_filer(name, bridge_name, bridge_id, folder_name, folder_id, sweep):
                                              "Name": "Shortcuts",
                                              "AppIntentIdentifier": "MoveShortcutToFolderAction"},
                      "shortcuts": [{"identifier": bridge_id, "displayString": bridge_name}],
-                     "folder": {"identifier": folder_id, "displayString": folder_name}}})
+                     # Not the `identifier`/`displayString` envelope the Shortcut
+                     # entity above accepts. An App Intents entity literal is
+                     # title/subtitle/identifier — the shape the editor writes when
+                     # a folder is picked by hand — and the identifier is the bare
+                     # collection UUID. The displayString envelope with the same
+                     # UUID falls straight through to the folder picker.
+                     "folder": {"title": {"key": folder_name},
+                                "subtitle": {"key": folder_name},
+                                "identifier": folder_id}}})
     if sweep:
         acts.append({"WFWorkflowActionIdentifier": "com.apple.shortcuts.DeleteWorkflowAction",
                      "WFWorkflowActionParameters": {
@@ -549,12 +557,40 @@ def install_signed(workflow, name):
                    check=False, capture_output=True)
     if not os.path.exists(signed) or os.path.getsize(signed) == 0:
         return False
+    # Importing is not silent: `open` puts up an "Add Shortcut" preview window
+    # and nothing installs until it is confirmed. Left alone, previews stack
+    # invisibly and every later import lands behind them. Confirm it the way
+    # bin/delete-bridge-build does — wait for the window count to rise, then
+    # send Return to the frontmost window, which is the preview's default
+    # button. Only when a window actually appeared: a Return into the editor
+    # is a keystroke into someone's shortcut.
+    before = window_count()
     subprocess.run(["open", "-a", "Shortcuts", signed], check=False)
-    for _ in range(15):
+    for _ in range(8):
+        time.sleep(1)
+        if library_holds(name):
+            return True
+        if window_count() > before:
+            subprocess.run(["osascript", "-e", 'tell application "Shortcuts" to activate',
+                            "-e", "delay 0.5",
+                            "-e", 'tell application "System Events" to keystroke return'],
+                           capture_output=True)
+            break
+    for _ in range(10):
         time.sleep(2)
         if library_holds(name):
             return True
     return False
+
+
+def window_count():
+    out = subprocess.run(["osascript", "-e",
+                          'tell application "System Events" to tell process "Shortcuts" to count windows'],
+                         capture_output=True, text=True)
+    try:
+        return int(out.stdout.strip() or 0)
+    except ValueError:
+        return 0
 
 
 def file_bridge(bridge_name, folder_name):
