@@ -610,9 +610,8 @@ DONE = os.path.join(SPOOL, "done")
 def screen_is_locked():
     """Whether the login session's screen is locked.
 
-    Shortcuts will not run while it is: `shortcuts run` hangs until it is
-    killed, and importing a Shortcut silently does nothing. Neither reports an
-    error, so this is checked up front rather than inferred from a timeout.
+    Only importing a Shortcut needs the screen (its preview must be confirmed);
+    running one does not. Kept for `doctor`, which reports it as context.
     """
     out = subprocess.run(["ioreg", "-n", "Root", "-d1", "-a"],
                          capture_output=True, text=True)
@@ -809,11 +808,13 @@ def flush(verbose=True, only=None):
 
 
 def _flush(items, verbose):
-    if screen_is_locked():
-        if verbose:
-            print(f"{len(items)} queued; screen is locked, so Shortcuts cannot "
-                  "run. They will be logged on unlock.", file=sys.stderr)
-        return 0, len(items)
+    # No lock check here. Shortcuts runs while the screen is locked — verified
+    # with the lock state read before, between and after runs — and what looked
+    # like "locked blocks runs" was three other things: `shortcuts run` reading
+    # stdin to EOF when given no -i, a shortcut showing its result in a dialog,
+    # and a picker left pending by an earlier run. Only IMPORTING a Shortcut
+    # needs the screen, for its preview. The queue stays as the safety net: a
+    # write that does not land stays pending.
     os.makedirs(DONE, exist_ok=True)
     ok = 0
     for path in items:
@@ -1072,9 +1073,6 @@ def main():
     if a.cmd == "goal":
         # A read, so there is nothing to queue: a goal fetched later is not the
         # same answer, and a stale one is worse than none.
-        if screen_is_locked():
-            sys.exit("the screen is locked, so Shortcuts cannot run; `goal` "
-                     "needs the bridge and has no queued form.")
         good, out = dispatch("goal", {})
         if not good:
             sys.exit(f"goal: {out}")
@@ -1109,10 +1107,8 @@ def main():
         if ok:
             print(f"logged {fields.get('name', cmd)}")
         else:
-            why = ("the screen is locked" if screen_is_locked()
-                   else "the write did not land")
-            print(f"queued — {why}. It will be logged automatically when this "
-                  "Mac is unlocked, or now from the phone.", file=sys.stderr)
+            print("queued — the write did not land. `foodnomsctl flush` retries; "
+                  "the queue agent does so on its own.", file=sys.stderr)
         return
 
     con = connect()
