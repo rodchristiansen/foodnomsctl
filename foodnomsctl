@@ -664,6 +664,30 @@ def meal_index(con, want):
     sys.exit(f"no such meal type: {want!r}. This library has: {known}")
 
 
+# Every nutrient CreateFoodIntent accepts, as a flag. Units are the ones
+# FoodNoms stores and shows on a label: grams for macros, mg for minerals and
+# the water-soluble vitamins, mcg for vitamins A, D, K and B12, folate, biotin,
+# selenium, chromium, molybdenum and iodine. Supplements are why the panel is
+# complete — a capsule is 0 kcal and nothing but micronutrients.
+NUTRIENT_FLAGS = (
+    ("--calories", "energyCalories"), ("--protein", "protein"), ("--carbs", "carbs"),
+    ("--fat", "fat"), ("--fat-saturated", "fatSaturated"), ("--fat-trans", "fatTrans"),
+    ("--fat-monounsaturated", "fatMonounsaturated"),
+    ("--fat-polyunsaturated", "fatPolyunsaturated"), ("--cholesterol", "cholesterol"),
+    ("--sodium", "sodium"), ("--fiber", "fiber"), ("--sugars", "sugars"),
+    ("--sugars-added", "sugarsAdded"), ("--sugar-alcohols", "sugarAlcohols"),
+    ("--net-carbs", "netCarbs"), ("--caffeine", "caffeine"), ("--vitamin-a", "vitaminA"),
+    ("--vitamin-c", "vitaminC"), ("--vitamin-d", "vitaminD"), ("--vitamin-e", "vitaminE"),
+    ("--vitamin-k", "vitaminK"), ("--thiamin", "thiamin"), ("--riboflavin", "riboflavin"),
+    ("--niacin", "niacin"), ("--vitamin-b6", "vitaminB6"), ("--vitamin-b12", "vitaminB12"),
+    ("--folate", "folate"), ("--pantothenic-acid", "pantothenicAcid"), ("--biotin", "biotin"),
+    ("--calcium", "calcium"), ("--iron", "iron"), ("--potassium", "potassium"),
+    ("--magnesium", "magnesium"), ("--phosphorus", "phosphorus"), ("--zinc", "zinc"),
+    ("--copper", "copper"), ("--manganese", "manganese"), ("--selenium", "selenium"),
+    ("--chromium", "chromium"), ("--molybdenum", "molybdenum"), ("--iodine", "iodine"),
+)
+
+
 def enqueue(command, params):
     os.makedirs(PENDING, exist_ok=True)
     req = {"command": command, "queued": datetime.now().isoformat(timespec="seconds"),
@@ -894,9 +918,11 @@ def main():
                     help="queue without attempting to write")
     cf.add_argument("name")
     cf.add_argument("--brand"); cf.add_argument("--barcode")
-    cf.add_argument("--serving-size", dest="servingSize")
-    for flag, dest in (("--calories", "energyCalories"), ("--protein", "protein"),
-                       ("--carbs", "carbs"), ("--fat", "fat")):
+    cf.add_argument("--serving-size", dest="servingSize",
+                    help='the label\'s serving, e.g. "1 capsule" or "2 softgels"')
+    cf.add_argument("--serving-grams", dest="servingMetricAmount", type=float,
+                    help="what that serving weighs, if the label says")
+    for flag, dest in NUTRIENT_FLAGS:
         cf.add_argument(flag, dest=dest, type=float)
     sub.add_parser("goal", help="today's goal")
     sub.add_parser("flush", help="log everything queued, if the Mac can write")

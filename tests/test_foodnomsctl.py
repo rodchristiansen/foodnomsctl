@@ -7,6 +7,7 @@ answer looks like a right one.
 """
 import importlib.util
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -358,3 +359,22 @@ class TestStoreDiscovery(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestCreateFoodPanel(unittest.TestCase):
+    """create-food exposes exactly the nutrient panel the manifest sends."""
+
+    def manifest_params(self):
+        text = open(os.path.join(HERE, os.pardir, "intents.yaml")).read()
+        block = text.split("- command: create-food", 1)[1].split("\n  - command:", 1)[0]
+        return set(re.findall(r"^\s{6}(\w+): \{type: number\}", block, re.M))
+
+    def test_every_numeric_manifest_param_has_a_flag(self):
+        dests = {dest for _, dest in fn.NUTRIENT_FLAGS} | {"servingMetricAmount"}
+        self.assertEqual(self.manifest_params(), dests)
+
+    def test_micronutrients_are_in_the_panel(self):
+        dests = {dest for _, dest in fn.NUTRIENT_FLAGS}
+        for key in ("vitaminD", "vitaminK", "biotin", "zinc", "copper", "magnesium",
+                    "molybdenum", "fatPolyunsaturated"):
+            self.assertIn(key, dests)
