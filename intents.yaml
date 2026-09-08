@@ -107,10 +107,52 @@ commands:
       brand: {type: text}
       barcode: {type: text}
       servingSize: {type: text}
+      servingMetricAmount: {type: number}
+      # The whole nutrient panel CreateFoodIntent accepts, in the units FoodNoms
+      # stores — mg for minerals and the water-soluble vitamins, mcg for A, D,
+      # K, B12, folate, biotin, selenium, chromium, molybdenum and iodine.
+      # Supplements are the reason: a capsule is 0 kcal and all micronutrients.
       energyCalories: {type: number}
       protein: {type: number}
       carbs: {type: number}
       fat: {type: number}
+      fatSaturated: {type: number}
+      fatTrans: {type: number}
+      fatMonounsaturated: {type: number}
+      fatPolyunsaturated: {type: number}
+      cholesterol: {type: number}
+      sodium: {type: number}
+      fiber: {type: number}
+      sugars: {type: number}
+      sugarsAdded: {type: number}
+      sugarAlcohols: {type: number}
+      netCarbs: {type: number}
+      caffeine: {type: number}
+      vitaminA: {type: number}
+      vitaminC: {type: number}
+      vitaminD: {type: number}
+      vitaminE: {type: number}
+      vitaminK: {type: number}
+      thiamin: {type: number}
+      riboflavin: {type: number}
+      niacin: {type: number}
+      vitaminB6: {type: number}
+      vitaminB12: {type: number}
+      folate: {type: number}
+      pantothenicAcid: {type: number}
+      biotin: {type: number}
+      calcium: {type: number}
+      iron: {type: number}
+      potassium: {type: number}
+      magnesium: {type: number}
+      phosphorus: {type: number}
+      zinc: {type: number}
+      copper: {type: number}
+      manganese: {type: number}
+      selenium: {type: number}
+      chromium: {type: number}
+      molybdenum: {type: number}
+      iodine: {type: number}
 
 # SearchFoodnomsDatabaseIntent is absent too, for a different reason that no
 # metadata reveals: it presents FoodNoms' food picker and blocks until someone

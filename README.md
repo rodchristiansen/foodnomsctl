@@ -214,6 +214,7 @@ it for import — importing is a tap you make once in Shortcuts. After that:
 ```bash
 foodnomsctl log "Cold brew" --calories 15 --protein 1
 foodnomsctl create-food "House Granola" --brand "Homemade" --calories 220 --protein 6
+foodnomsctl create-food "Vitamin K2 + D3" --brand Nutratology --serving-size "1 capsule" --calories 0 --vitamin-k 120 --vitamin-d 25
 foodnomsctl goal
 ```
 

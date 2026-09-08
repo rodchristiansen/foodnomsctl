@@ -163,6 +163,16 @@ mistaken for the way things have to be.
 
 ## Unreleased
 
+- `create-food` takes the whole nutrient panel `CreateFoodIntent` accepts — saturated,
+  trans, mono- and polyunsaturated fat, cholesterol, sodium, fiber, sugars, added sugars,
+  sugar alcohols, net carbs, caffeine, every vitamin, and every mineral — plus
+  `--serving-grams`. Units are FoodNoms' own: grams for macros, mg for minerals and the
+  water-soluble vitamins, mcg for A, D, K, B12, folate, biotin, selenium, chromium,
+  molybdenum and iodine. Supplements are the reason: a capsule is 0 kcal and all
+  micronutrients, and until now the only way to give FoodNoms those numbers was the app.
+- The regenerated bridge carries the new parameters; reinstall it (`foodnomsctl-bridge
+  --publish`) or `create-food` writes a food with macros only.
+
 - Writes no longer wait for the screen to be unlocked. Shortcuts runs while the
   Mac is locked — verified with the lock state read before, between and after
   runs — so `log` dispatches immediately and the queue is only the safety net.
