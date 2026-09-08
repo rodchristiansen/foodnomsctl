@@ -30,6 +30,9 @@
 bundle: com.algebraiclabs.foodnoms
 team: 32642VZFU3
 shortcut_name: FoodNomsCTL Bridge
+# The Shortcuts folder every build is filed into after import. Resolved by name
+# against the Library record at publish time; see folder_identifiers().
+folder: Nutrition
 
 commands:
   - command: log
