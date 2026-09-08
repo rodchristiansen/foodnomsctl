@@ -33,6 +33,7 @@ generated bridge Shortcut.
 import argparse
 import fcntl
 import glob
+import re
 import json
 import os
 import plistlib
@@ -56,7 +57,63 @@ BUNDLE = "com.algebraiclabs.foodnoms"
 # delete, so the only way to ship a build that adds a command is under a name
 # nothing holds yet. The old "FoodNomsCTL Bridge" stays in the library, answering
 # with whatever it was built from; nothing dispatches to it any more.
-BRIDGE = os.environ.get("FOODNOMSCTL_BRIDGE", "FoodNomsCTL Bridge 3")
+BRIDGE_PREFIX = "FoodNomsCTL Bridge"
+BRIDGE_STAMP = re.compile(r"^" + re.escape(BRIDGE_PREFIX) +
+                          r" (\d{4}\.\d{2}\.\d{2}\.\d{4})$")
+SHORTCUTS_DB = os.path.expanduser("~/Library/Shortcuts/Shortcuts.sqlite")
+
+
+def library_names():
+    """Every Shortcut name in the library.
+
+    Read from the database rather than `shortcuts list`, and with the -wal
+    copied alongside it: both that command and a bare copy read from the last
+    checkpoint and can be a day stale, which has twice produced confident wrong
+    conclusions about whether an import landed.
+    """
+    if not os.path.exists(SHORTCUTS_DB):
+        return []
+    tmp = tempfile.mkdtemp(prefix="foodnomsctl.lib.")
+    dst = os.path.join(tmp, "db.sqlite")
+    try:
+        shutil.copy2(SHORTCUTS_DB, dst)
+        for ext in ("-wal", "-shm"):
+            if os.path.exists(SHORTCUTS_DB + ext):
+                shutil.copy2(SHORTCUTS_DB + ext, dst + ext)
+        con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+        names = [r[0] for r in con.execute(
+            "SELECT ZNAME FROM ZSHORTCUT WHERE ZTOMBSTONED = 0 AND ZNAME IS NOT NULL")]
+        con.close()
+        return names
+    except (OSError, sqlite3.Error):
+        return []
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def find_bridge():
+    """The bridge to dispatch through: the newest build in the library.
+
+    Builds are stamped `FoodNomsCTL Bridge YYYY.MM.DD.HHMM` because importing a
+    Shortcut never replaces one of the same name — a rebuild under a fixed name
+    either is refused or lands beside the old copy, and the `shortcuts` CLI
+    cannot delete. Stamping makes an upgrade a rebuild, and picking the highest
+    stamp means the CLI follows it with nothing to configure. The old copies can
+    be deleted later, or left; they are inert once nothing points at them.
+    """
+    override = os.environ.get("FOODNOMSCTL_BRIDGE")
+    if override:
+        return override
+    stamped = sorted((m.group(1), n) for n in library_names()
+                     if (m := BRIDGE_STAMP.match(n)))
+    if stamped:
+        return stamped[-1][1]
+    # Pre-stamp builds, newest-looking last.
+    legacy = sorted(n for n in library_names() if n.startswith(BRIDGE_PREFIX))
+    return legacy[-1] if legacy else BRIDGE_PREFIX
+
+
+BRIDGE = find_bridge()
 
 # FoodNoms has moved its store twice. The Core Data one in the app group
 # container stops in 2022 and the group-container GRDB copy stops in 2025; both
@@ -579,6 +636,35 @@ def missing_macros(params):
     return [MACRO_FLAG[k] for k in REQUIRED_MACROS if params.get(k) is None]
 
 
+def meal_types(con):
+    """The meal types in the order FoodNoms' allMealTypes returns them.
+
+    `mealTypeRecord.sortIndex` is the app's own ordering, and the bridge picks a
+    meal by position because Shortcuts' filter actions cannot see an entity's
+    properties. Reading it beats hard-coding: the list is user-editable, and a
+    wrong index silently files food under the wrong meal rather than failing.
+    """
+    rows = con.execute("""SELECT mealTypeID, name, sortIndex, disabled
+                          FROM mealTypeRecord ORDER BY sortIndex""").fetchall()
+    # Defaults carry no name; their identity is the id, in the app's own order.
+    default = {"1": "breakfast", "2": "lunch", "3": "dinner", "4": "snack"}
+    out = []
+    for i, r in enumerate(rows, start=1):
+        label = (r["name"] or default.get(str(r["mealTypeID"]))
+                 or f"meal{r['mealTypeID']}")
+        out.append({"index": i, "id": str(r["mealTypeID"]),
+                    "name": label.lower(), "disabled": bool(r["disabled"])})
+    return out
+
+
+def meal_index(con, want):
+    for m in meal_types(con):
+        if m["name"] == want.lower():
+            return m["index"]
+    known = ", ".join(m["name"] for m in meal_types(con) if not m["disabled"])
+    sys.exit(f"no such meal type: {want!r}. This library has: {known}")
+
+
 def enqueue(command, params):
     os.makedirs(PENDING, exist_ok=True)
     req = {"command": command, "queued": datetime.now().isoformat(timespec="seconds"),
@@ -683,8 +769,15 @@ def dispatch(command, params, settle=45):
 LOCK = os.path.join(SPOOL, "flush.lock")
 
 
-def flush(verbose=True):
+def flush(verbose=True, only=None):
     """Drain the queue, one drainer at a time.
+
+    `only` limits the drain to a single request. That matters more than it
+    looks: `log` used to enqueue and then drain everything, so a request whose
+    write had landed but whose verification lagged behind FoodNoms\' WAL stayed
+    pending and was re-dispatched by the NEXT log\'s flush — nine sequential
+    logs gave eight chances to double-write, which is exactly what happened to
+    a nine-item meal. A log now drains only what it just queued.
 
     The exclusive lock is not a nicety. The launchd agent drains on an interval
     AND on any change to the queue directory, so a drain started by hand runs
@@ -696,7 +789,8 @@ def flush(verbose=True):
 
     A no-op, and a fast one, while the screen is locked.
     """
-    items = queued()
+    items = [only] if only else queued()
+    items = [p for p in items if os.path.exists(p)]
     if not items:
         return 0, 0
     os.makedirs(SPOOL, exist_ok=True)
@@ -783,6 +877,8 @@ def main():
     lg = sub.add_parser("log", help="log a food by name with macros")
     lg.add_argument("--queue-only", action="store_true",
                     help="queue without attempting to write")
+    lg.add_argument("--meal", help="breakfast, lunch, dinner or snack. Omitted, "
+                                   "FoodNoms picks one and often picks wrong")
     lg.add_argument("name")
     lg.add_argument("--date", dest="date", type=parse_when,
                     help="when to log it: YYYY-MM-DD, 'YYYY-MM-DD HH:MM', or an "
@@ -803,6 +899,7 @@ def main():
         cf.add_argument(flag, dest=dest, type=float)
     sub.add_parser("goal", help="today's goal")
     sub.add_parser("flush", help="log everything queued, if the Mac can write")
+    sub.add_parser("meal-types", help="the meal types, in the order the bridge picks them")
     dl = sub.add_parser("delete", help="delete a logged entry by name or entry id")
     dl.add_argument("target", help="entry id, or a name to match in a day's log")
     dl.add_argument("--on", default=date.today().isoformat(),
@@ -953,6 +1050,15 @@ def main():
               + (f", moved to {target_day}" if target_day != a.on else ""))
         return
 
+    if a.cmd == "meal-types":
+        ms = meal_types(connect())
+        if a.json:
+            print(json.dumps(ms, indent=2)); return
+        for m in ms:
+            print(f"  {m['index']}  {m['name']:<12} id={m['id']}"
+                  + ("  (disabled)" if m["disabled"] else ""))
+        return
+
     if a.cmd == "flush":
         ok, left = flush()
         if a.json:
@@ -978,7 +1084,13 @@ def main():
 
     if a.cmd in ("log", "create-food"):
         fields = {k: v for k, v in vars(a).items()
-                  if k not in ("cmd", "json", "queue_only")}
+                  if k not in ("cmd", "json", "queue_only", "meal")}
+        cmd = a.cmd
+        if getattr(a, "meal", None):
+            # A different branch entirely: mealType is entity-typed, so it is
+            # reached by chaining GetMealTypeIntent rather than by a parameter.
+            fields["meal_index"] = meal_index(connect(), a.meal)
+            cmd = "log-meal"
         if a.cmd == "log":
             gap = missing_macros(fields)
             if gap:
@@ -989,13 +1101,13 @@ def main():
                          "macro really is zero.")
         # Queued before it is attempted, so a write is never lost to a locked
         # screen, a crash, or a bridge that accepts and does nothing.
-        path = enqueue(a.cmd, fields)
+        path = enqueue(cmd, fields)
         if getattr(a, "queue_only", False):
             print(f"queued {os.path.basename(path)}")
             return
-        ok, left = flush(verbose=False)
+        ok, left = flush(verbose=False, only=path)
         if ok:
-            print(f"logged {fields.get('name', a.cmd)}")
+            print(f"logged {fields.get('name', cmd)}")
         else:
             why = ("the screen is locked" if screen_is_locked()
                    else "the write did not land")

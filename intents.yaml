@@ -29,7 +29,7 @@
 
 bundle: com.algebraiclabs.foodnoms
 team: 32642VZFU3
-shortcut_name: FoodNomsCTL Bridge 3
+shortcut_name: FoodNomsCTL Bridge
 
 commands:
   - command: log
@@ -55,6 +55,43 @@ commands:
       fiber: {type: number}
       sugars: {type: number}
       sodium: {type: number}
+
+  - command: log-meal
+    intent: GetMealTypeIntent
+    summary: Log a food into a named meal
+    # Not LogQuickEntryIntent directly. `mealType` is entity-typed, and an
+    # entity never binds from a value arriving in a request — omit it and
+    # FoodNoms picks one itself, which is how nine lunch items landed in Snack.
+    #
+    # Entities do bind from another action's output, so this fetches every meal
+    # type (`scope: allMealTypes` returns the lot with no picker, unlike
+    # `scope: mealType`, which asks), takes one by position, and hands that to
+    # the log. Same shape as `delete`.
+    #
+    # Position, not name: Shortcuts' filter actions cannot see an entity's
+    # properties. The order is the app's own `sortIndex`, which the CLI reads
+    # straight out of mealTypeRecord rather than assuming.
+    fixed:
+      scope: allMealTypes
+    after:
+      - {do: item, index_key: meal_index}
+      - do: intent
+        intent: LogQuickEntryIntent
+        param: mealType
+        fixed:
+          dateTimePreference: dateAndTime
+          uncertainty: exact
+          requireMacros: true
+        params:
+          - name
+          - date
+          - energyCalories
+          - protein
+          - carbs
+          - fat
+          - fiber
+          - sugars
+          - sodium
 
   - command: create-food
     intent: CreateFoodIntent
