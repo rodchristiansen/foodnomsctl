@@ -15,8 +15,9 @@ Intents being the only way in. A URL scheme that logs (`foodnoms://log?...`, x-c
 style), or a documented local endpoint, would remove every constraint below at once. The
 existing `foodnoms://` scheme is navigation-only — `goals/`, `history/goal/`,
 `resting-energy/show-data` — so today a script has to generate, sign and install a Shortcut,
-and Shortcuts does not run at all while a Mac's screen is locked. That single fact makes
-unattended logging impossible on a locked machine no matter how the intents behave.
+and importing a Shortcut needs an unlocked screen. Running one does not — the entry lands
+under a locked screen — but `shortcuts run` may then never return, so a caller has to judge
+the write by reading the store back.
 
 ## Intents that cannot run unattended
 
@@ -110,6 +111,17 @@ loses the food's barcode and serving measure; keeping them means generating a on
 with the food baked in as a literal.
 
 **Ask:** an edit intent taking an entry and the fields to change.
+
+### There is no edit-a-food intent
+
+`CreateFoodIntent` takes the whole nutrient panel — every vitamin and mineral, the fat
+breakdown, caffeine — so a supplement can be created headlessly with its label's numbers.
+Nothing can change those numbers afterwards. A reformulated product, a transcription slip, or
+a label read more carefully the second time means a new food, and every past entry stays on
+the old one.
+
+**Ask:** an update intent taking a food and the fields to change, with the same panel
+`CreateFoodIntent` accepts.
 
 ## Not FoodNoms' to fix
 
