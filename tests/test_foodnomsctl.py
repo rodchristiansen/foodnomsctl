@@ -274,6 +274,76 @@ class TestBridgeVersioning(unittest.TestCase):
                                    env="Some Other Bridge"), "Some Other Bridge")
 
 
+_bspec = importlib.util.spec_from_loader(
+    "fnbridge", SourceFileLoader("fnbridge", os.path.join(HERE, os.pardir, "foodnomsctl-bridge")))
+fb = importlib.util.module_from_spec(_bspec)
+_bspec.loader.exec_module(fb)
+
+
+def _venc(n):
+    out = bytearray()
+    while True:
+        x = n & 0x7f; n >>= 7
+        if n: out.append(x | 0x80)
+        else: out.append(x); return bytes(out)
+
+
+def _f(field, payload):
+    """One length-delimited protobuf field."""
+    return bytes([(field << 3) | 2]) + _venc(len(payload)) + payload
+
+
+def _v(field, n):
+    return bytes([field << 3]) + _venc(n)
+
+
+class TestFolderIdentifiers(unittest.TestCase):
+    """Reading a folder's identifier out of the Library CRDT record.
+
+    A synthetic document in the shape the decoder relies on: a string table
+    under doc field 2, and ops under top-level field 4 whose field 5 carries an
+    inline object id and whose field 4 holds a register set to a string ref.
+    """
+
+    def blob(self):
+        strs = ["name", "shortcuts", "Nutrition", "Fitness"]
+        doc = b"".join(_f(2, s.encode()) for s in strs)
+        def op(obj, str_idx):
+            reg = _f(2, _v(3, str_idx))
+            return _f(4, _f(4, _f(2, reg)) + _f(5, _f(2, b"\x01" + obj.encode())))
+        body = (_f(6, doc)
+                + op("24C2199D-AFF4-44F8-935A-AA54194CDA47", 2)
+                + op("EBD7D7DE-179B-4F35-9628-FF10B83276E4", 3)
+                # A shortcut object naming itself must not be mistaken for a folder.
+                + op("2D6D9DB2-DB7B-4B87-BE89-CD1469938158", 2))
+        return b"crdt\x07\x00\x00\x00" + body
+
+    def test_pairs_each_folder_name_with_its_object_id(self):
+        real = fb.library_workflows
+        fb.library_workflows = lambda: {"Bridge": "2D6D9DB2-DB7B-4B87-BE89-CD1469938158"}
+        try:
+            got = fb.folder_identifiers(self.blob())
+        finally:
+            fb.library_workflows = real
+        self.assertEqual(got, {"Nutrition": "24C2199D-AFF4-44F8-935A-AA54194CDA47",
+                               "Fitness": "EBD7D7DE-179B-4F35-9628-FF10B83276E4"})
+
+    def test_a_non_crdt_blob_yields_nothing(self):
+        self.assertEqual(fb.folder_identifiers(b"bplist00junk"), {})
+
+    def test_the_filer_binds_both_entities_as_literals(self):
+        w = fb.build_filer("ZZ Filer 1", "Bridge", "2D6D9DB2-DB7B-4B87-BE89-CD1469938158",
+                           "Nutrition", "24C2199D-AFF4-44F8-935A-AA54194CDA47",
+                           [("ZZ Filer 0", "00000000-0000-4000-8000-000000000000")])
+        acts = w["WFWorkflowActions"]
+        move = acts[1]["WFWorkflowActionParameters"]
+        self.assertEqual(move["folder"], {"identifier": "24C2199D-AFF4-44F8-935A-AA54194CDA47",
+                                          "displayString": "Nutrition"})
+        self.assertEqual(move["shortcuts"][0]["identifier"], "2D6D9DB2-DB7B-4B87-BE89-CD1469938158")
+        self.assertFalse(move["ShowWhenRun"])
+        self.assertEqual(acts[2]["WFWorkflowActionIdentifier"], "com.apple.shortcuts.DeleteWorkflowAction")
+
+
 class TestStoreDiscovery(unittest.TestCase):
     def test_the_abandoned_stores_are_named_so_they_can_be_ruled_out(self):
         # Both are still on disk on any machine that has run FoodNoms for long

@@ -22,8 +22,10 @@ which Shortcuts resolves through picker UI with no headless equivalent.
 import argparse
 import os
 import plistlib
+import re
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime
 
@@ -332,6 +334,254 @@ def verify(workflow):
         sys.exit(f"control flow: {depth} block(s) left open")
 
 
+# ------------------------------------------------------------ the folder
+#
+# Filing the bridge into a Shortcuts folder needs a RootNavigationDestination
+# entity, and entities bind from a literal identifier or another action's
+# output, never from a name. There is no action that returns an existing
+# folder (CreateFolderAction returns one, and refuses a name that exists), so
+# the identifier has to be read. It is not in ZCOLLECTION — that entity is
+# abandoned — but in the single Library record, whose ZDATA is a "crdt"
+# document: a protobuf with a string table, a value table, and ops keyed by
+# object id. Each folder is an object whose id is a UUID string and whose
+# `name` register is a string-table ref. Pairing those is all this needs.
+SHORTCUTS_DB = os.path.expanduser("~/Library/Shortcuts/Shortcuts.sqlite")
+UUID_RE = re.compile(r"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$", re.I)
+
+
+def _library_connection():
+    """A read-only connection to a snapshot of the library, WAL included.
+
+    `shortcuts list` and a bare copy of the file both read from the last
+    checkpoint and can be a day stale; copying the -wal alongside is what makes
+    a just-finished import visible. Never opened in place: the file is
+    CloudKit-mirrored and a lock held on it is not worth the risk.
+    """
+    import shutil, tempfile, sqlite3
+    if not os.path.exists(SHORTCUTS_DB):
+        return None
+    tmp = tempfile.mkdtemp(prefix="fnbridge.lib.")
+    dst = os.path.join(tmp, "db.sqlite")
+    shutil.copy2(SHORTCUTS_DB, dst)
+    if os.path.exists(SHORTCUTS_DB + "-wal"):
+        shutil.copy2(SHORTCUTS_DB + "-wal", dst + "-wal")
+    return sqlite3.connect(dst)
+
+
+def library_workflows():
+    """{name: workflow id} for every live Shortcut."""
+    con = _library_connection()
+    if con is None:
+        return {}
+    try:
+        return {n: w for n, w in con.execute(
+            "SELECT ZNAME, ZWORKFLOWID FROM ZSHORTCUT WHERE ZTOMBSTONED = 0 AND ZNAME IS NOT NULL")}
+    finally:
+        con.close()
+
+
+def _varint(b, i):
+    r = s = 0
+    while i < len(b):
+        x = b[i]; i += 1
+        r |= (x & 0x7f) << s; s += 7
+        if not x & 0x80:
+            return r, i
+        if s > 63:
+            break
+    raise ValueError("bad varint")
+
+
+def _fields(b):
+    """One protobuf message as [(field, wiretype, value)], schema-free."""
+    i, out = 0, []
+    while i < len(b):
+        key, i = _varint(b, i)
+        f, wt = key >> 3, key & 7
+        if f == 0 or f > 5000:
+            raise ValueError("not a message")
+        if wt == 0:
+            v, i = _varint(b, i)
+        elif wt == 1:
+            v = b[i:i + 8]; i += 8
+        elif wt == 5:
+            v = b[i:i + 4]; i += 4
+        elif wt == 2:
+            n, i = _varint(b, i)
+            if n > len(b) - i:
+                raise ValueError("truncated")
+            v = b[i:i + n]; i += n
+        else:
+            raise ValueError("unsupported wire type")
+        out.append((f, wt, v))
+    return out
+
+
+def folder_identifiers(blob=None):
+    """{folder name: identifier} from the Library CRDT document.
+
+    Layout, found by walking it: top-level field 6 is the document, holding a
+    replica id (1), the string table (repeated 2) and the value table (repeated
+    3). Top-level field 4 is repeated ops; an op's field 5 carries its object id
+    as an inline `0x01 + text` value, and a register set to a string is a
+    singleton sub-message `{3: <string table index>}`. A folder object is the
+    one whose name register resolves to its display name.
+    """
+    if blob is None:
+        con = _library_connection()
+        if con is None:
+            return {}
+        try:
+            row = con.execute("SELECT ZDATA FROM ZLIBRARY").fetchone()
+        finally:
+            con.close()
+        if not row:
+            return {}
+        blob = row[0]
+    if blob[:4] != b"crdt":
+        return {}
+    top = _fields(blob[8:])
+    doc = next((v for f, wt, v in top if f == 6 and wt == 2), None)
+    if doc is None:
+        return {}
+    strs = [v.decode("utf-8", "replace") for f, wt, v in _fields(doc) if f == 2]
+    workflows = set(library_workflows().values())
+    names = {}
+
+    def object_id(msg):
+        for f, wt, v in msg:
+            if f == 5 and wt == 2:
+                try:
+                    for sf, swt, sv in _fields(v):
+                        if sf == 2 and swt == 2 and sv[:1] == b"\x01":
+                            t = sv[1:].decode("utf-8", "replace")
+                            if UUID_RE.match(t):
+                                return t.upper()
+                except ValueError:
+                    pass
+        return None
+
+    def walk(b, obj):
+        try:
+            fs = _fields(b)
+        except ValueError:
+            return
+        if len(fs) == 1 and fs[0][0] == 3 and fs[0][1] == 0 and fs[0][2] < len(strs):
+            names.setdefault(obj, set()).add(strs[fs[0][2]])
+        for f, wt, v in fs:
+            if wt == 2:
+                walk(v, obj)
+
+    for f, wt, v in top:
+        if f != 4 or wt != 2:
+            continue
+        try:
+            msg = _fields(v)
+        except ValueError:
+            continue
+        obj = object_id(msg)
+        if not obj or obj in workflows:
+            continue
+        for mf, mwt, mv in msg:
+            if mf == 4 and mwt == 2:
+                walk(mv, obj)
+
+    out = {}
+    for obj, ns in names.items():
+        for n in ns:
+            out.setdefault(n, set()).add(obj)
+    # A name that resolves to exactly one non-workflow object is a folder.
+    return {n: next(iter(ids)) for n, ids in out.items() if len(ids) == 1}
+
+
+FILER_PREFIX = "ZZ Filer"
+
+
+def build_filer(name, bridge_name, bridge_id, folder_name, folder_id, sweep):
+    """A one-shot Shortcut that files the bridge and sweeps up older filers.
+
+    Single-use by nature: the bridge's workflow id is assigned at import, so
+    the move can only be written after the bridge exists, as a literal. Each
+    filer also deletes the previous ones, so the steady state is exactly one.
+    """
+    stamp = datetime.now().strftime("%Y.%m.%d.%H%M")
+    acts = [action("is.workflow.actions.comment", {
+        "UUID": str(uuid.uuid4()).upper(),
+        "WFCommentActionText": (
+            f"{name} v{stamp} — moves \"{bridge_name}\" into the \"{folder_name}\" "
+            "folder, then deletes earlier filers. Both the Shortcut and the "
+            "folder are written in as literal entities: the folder identifier "
+            "comes from the Shortcuts Library record, because no action returns "
+            "an existing folder and a name will not bind.\n\nGenerated by "
+            "foodnomsctl-bridge — regenerate, do not hand-edit.")})]
+    acts.append({"WFWorkflowActionIdentifier": "com.apple.shortcuts.MoveShortcutToFolderAction",
+                 "WFWorkflowActionParameters": {
+                     "UUID": str(uuid.uuid4()).upper(), "ShowWhenRun": False,
+                     "AppIntentDescriptor": {"BundleIdentifier": "com.apple.shortcuts",
+                                             "Name": "Shortcuts",
+                                             "AppIntentIdentifier": "MoveShortcutToFolderAction"},
+                     "shortcuts": [{"identifier": bridge_id, "displayString": bridge_name}],
+                     "folder": {"identifier": folder_id, "displayString": folder_name}}})
+    if sweep:
+        acts.append({"WFWorkflowActionIdentifier": "com.apple.shortcuts.DeleteWorkflowAction",
+                     "WFWorkflowActionParameters": {
+                         "UUID": str(uuid.uuid4()).upper(), "ShowWhenRun": False,
+                         "entities": [{"identifier": w, "displayString": n} for n, w in sweep]}})
+    return {"WFWorkflowActions": acts, "WFWorkflowClientVersion": CLIENT_VERSION,
+            "WFWorkflowHasOutputFallback": False, "WFWorkflowHasShortcutInputVariables": False,
+            "WFWorkflowIcon": {"WFWorkflowIconGlyphNumber": 59511,
+                               "WFWorkflowIconStartColor": 4282601983},
+            "WFWorkflowImportQuestions": [], "WFWorkflowInputContentItemClasses": [],
+            "WFWorkflowMinimumClientVersion": 900, "WFWorkflowMinimumClientVersionString": "900",
+            "WFWorkflowName": name, "WFWorkflowOutputContentItemClasses": [],
+            "WFWorkflowTypes": []}
+
+
+def install_signed(workflow, name):
+    """Sign and import a workflow; True once the library shows it."""
+    import shutil, tempfile
+    tmp = tempfile.mkdtemp(prefix="fnbridge.filer.")
+    staged = os.path.join(tmp, name + ".staged.shortcut")
+    signed = os.path.join(tmp, name + ".shortcut")
+    with open(staged, "wb") as fh:
+        plistlib.dump(workflow, fh)
+    subprocess.run(["shortcuts", "sign", "--mode", "anyone", "-i", staged, "-o", signed],
+                   check=False, capture_output=True)
+    if not os.path.exists(signed) or os.path.getsize(signed) == 0:
+        return False
+    subprocess.run(["open", "-a", "Shortcuts", signed], check=False)
+    for _ in range(15):
+        time.sleep(2)
+        if library_holds(name):
+            return True
+    return False
+
+
+def file_bridge(bridge_name, folder_name):
+    """Move an installed bridge into a folder, headlessly. Returns a message."""
+    folders = folder_identifiers()
+    folder_id = folders.get(folder_name)
+    if not folder_id:
+        return (f'no folder named "{folder_name}" in the Shortcuts library '
+                f"(have: {', '.join(sorted(folders)) or 'none readable'})")
+    wf = library_workflows()
+    bridge_id = wf.get(bridge_name)
+    if not bridge_id:
+        return f'"{bridge_name}" is not in the library, so there is nothing to file'
+    sweep = [(n, w) for n, w in wf.items() if n.startswith(FILER_PREFIX)]
+    name = f"{FILER_PREFIX} {datetime.now():%m%d%H%M}"
+    if not install_signed(build_filer(name, bridge_name, bridge_id, folder_name, folder_id, sweep), name):
+        return (f'"{name}" did not import, so the bridge was not filed. An open '
+                "Shortcuts editor window, a locked screen, or a freshly relaunched "
+                "Shortcuts all swallow imports silently; retry in a minute.")
+    try:
+        subprocess.run(["shortcuts", "run", name], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["pkill", "-f", f"shortcuts run {name}"], capture_output=True)
+        return f'"{name}" ran but did not return — a picker may be up, which means the folder did not bind'
+    return f'filed "{bridge_name}" into "{folder_name}" (via {name})'
+
+
 def library_holds(name):
     """Whether the Shortcuts library holds one by this name.
 
@@ -369,11 +619,24 @@ def main():
     ap.add_argument("--manifest", default=os.path.join(HERE, "intents.yaml"))
     ap.add_argument("--out", default=os.path.join(HERE, "FoodNomsCTL Bridge.xml"))
     ap.add_argument("--name", help="override the stamped Shortcut name")
+    ap.add_argument("--no-folder", action="store_true",
+                    help="skip filing the bridge into its folder after install")
+    ap.add_argument("--file", metavar="BRIDGE",
+                    help="only file an already-installed bridge into the folder, then exit")
+    ap.add_argument("--folders", action="store_true",
+                    help="print the folders the library exposes, then exit")
     ap.add_argument("--publish", action="store_true",
                     help="also sign it and open it so Shortcuts imports it")
     a = ap.parse_args()
 
     manifest = load_manifest(a.manifest)
+    if a.folders:
+        for n, i in sorted(folder_identifiers().items()):
+            print(f"  {i}  {n}")
+        return
+    if a.file:
+        print(file_bridge(a.file, manifest.get("folder", "Nutrition")))
+        return
     # Stamp every build. Importing never replaces a same-named Shortcut — it is
     # refused, or lands beside the old one — and the `shortcuts` CLI cannot
     # delete, so a fixed name means a rebuild silently keeps answering with the
@@ -424,6 +687,8 @@ def main():
         name = manifest["shortcut_name"]
         if library_holds(name):
             print(f'installed → "{name}"')
+            if not a.no_folder:
+                print(file_bridge(name, manifest.get("folder", "Nutrition")))
         else:
             print(f'NOT installed: "{name}" is not in the library. If a Shortcut '
                   "of that name is already there, the import was refused — "
