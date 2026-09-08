@@ -102,8 +102,13 @@ Recorded so they are not mistaken for app bugs.
   "Please choose a value for each parameter in this action" — including for commands that are
   themselves fine. It is why speculative intents cannot simply be added to the bridge and left
   unused.
-- **Shortcuts does not run while the screen is locked**, and an import silently no-ops rather
-  than erroring.
+- **Shortcuts does not run while the screen is locked**, and an import is not silent: it puts up
+  an "Add Shortcut" preview that has to be confirmed. See `app-intents.md` for confirming it
+  headlessly.
+- **There is no action that returns an existing folder.** `CreateFolderAction` returns one and
+  refuses a name that exists, so filing a Shortcut into a folder means reading the folder's
+  identifier out of the Library record and writing it as a literal — solved in
+  `foodnomsctl-bridge`, but a `GetFolderAction` would make it a chain instead of a decode.
 
 ## Context worth sending along
 

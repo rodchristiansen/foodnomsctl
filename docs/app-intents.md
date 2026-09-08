@@ -156,3 +156,56 @@ than assuming.
 
 Installing never replaces: a Shortcut already in the library under that name stays, and you
 get a second copy. Deleting is not scriptable — see [issue 001](issues/001-delete-does-not-bind-a-runtime-entity.md).
+
+## Two entity envelopes, and only one of them binds
+
+An entity literal is not one shape. `WFWorkflowReference` — the Shortcut entity that
+`DeleteWorkflowAction` and `MoveShortcutToFolderAction` take — binds from
+`{"identifier": <workflow id>, "displayString": <name>}`. An App Intents entity does not: the
+same action's `folder` parameter, a `RootNavigationDestination`, binds only from the shape the
+editor itself writes when a folder is picked by hand —
+
+```json
+{"title": {"key": "Nutrition"}, "subtitle": {"key": "Nutrition"},
+ "identifier": "24C2199D-AFF4-44F8-935A-AA54194CDA47"}
+```
+
+— which is the `foodEntry` shape from the top of this page, with the identifier here being the
+bare collection UUID. The `displayString` envelope carrying that same UUID falls straight
+through to the folder picker, and so do five JSON-encoded enum guesses, and the folder's name.
+Nothing distinguishes the two envelopes in the metadata; the action accepts both shapes side by
+side in one parameter list.
+
+The collection UUID itself is not in `ZCOLLECTION`, which is abandoned, but in the Library
+record's `ZDATA`, a `crdt`-tagged protobuf; `foodnomsctl-bridge --folders` decodes it.
+
+## Learning a shape by driving the editor
+
+The round-trip above — set the parameter by hand, read it back — does not need a hand. Every
+control in the Shortcuts editor is reachable through `AXUIElement`, and the shell has
+Accessibility, so:
+
+1. `open "shortcuts://open-shortcut?name=<name>"` opens the editor.
+2. The parameter token is an `AXButton` with `AXDescription` equal to the parameter's label
+   (`Folder`) and `AXIdentifier` `enum`. It exposes no AX actions, so it needs a real click:
+   post a `CGEvent` at the centre of its `AXPosition`/`AXSize`.
+3. The popover's rows are `AXButton`s beneath the token whose description is the folder name,
+   and they take `AXPress`. Do the click and the press from one process — re-enumerating from a
+   fresh process between them races the popover closing.
+4. `⌘W` closes the editor and persists the choice; read it back out of
+   `ZSHORTCUTACTIONS.ZDATA` with the `-wal` copied alongside.
+
+System Events is too slow for this tree (the editor has thousands of elements) and cannot press
+the rows; a forty-line Swift tool over `AXUIElement` walks it in under a second.
+
+## Importing is not silent
+
+`open -a Shortcuts <file>` on a signed `.shortcut` puts up an "Add Shortcut" preview window and
+installs nothing until it is confirmed. The window has no title and its buttons have no
+accessible names, so it is invisible to a name-based check; left alone, previews stack, and
+every later import lands behind them — which reads as "the import failed" while the file sits
+one Return away. Confirm it headlessly: record the Shortcuts window count, `open`, wait for the
+count to rise, then `activate` and send Return, which is the preview's default button. Only when
+a window actually appeared: a Return into the editor is a keystroke into someone's shortcut.
+Separately, Shortcuts neither imports nor runs while the screen is locked, and that failure is
+silent too.
