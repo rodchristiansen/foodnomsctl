@@ -163,6 +163,11 @@ mistaken for the way things have to be.
 
 ## Unreleased
 
+- Meal types five and six are named `pre-workout` and `post-workout` rather than `meal5` and
+  `meal6`. FoodNoms shows those names in its own meal picker but stores nothing, so two real
+  meal types could not be asked for by the name on screen. `Post Workout`, `postworkout` and
+  `post-wo` all resolve.
+
 - A write that lands after the settle cap is no longer reported as failed. The cap is the
   point at which waiting stopped, not proof of failure — a locked screen makes every write
   slower — and a request declared failed there stayed pending for the next drain to fire

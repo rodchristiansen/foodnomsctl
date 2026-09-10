@@ -434,3 +434,22 @@ class TestDayComponents(StoreTest):
     def test_totals_are_withheld_when_components_are_included(self):
         self.assertIsNone(fn.day(self.con, "2026-09-05", components=True)["totals"])
         self.assertIsNotNone(fn.day(self.con, "2026-09-05")["totals"])
+
+
+class TestWorkoutMealTypes(StoreTest):
+    """Meal types five and six are Pre-Workout and Post-Workout.
+
+    FoodNoms shows those names in its own picker and stores nothing, so they
+    used to surface as meal5/meal6 — a named, usable meal type that could not
+    be asked for by the name on screen.
+    """
+
+    def test_they_are_named(self):
+        names = [m["name"] for m in fn.meal_types(self.con)]
+        self.assertIn("pre-workout", names)
+        self.assertIn("post-workout", names)
+
+    def test_spellings_resolve(self):
+        for spelling in ("post-workout", "Post Workout", "postworkout", "POST-WORKOUT"):
+            self.assertEqual(fn.meal_index(self.con, spelling),
+                             fn.meal_index(self.con, "post-workout"))
