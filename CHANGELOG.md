@@ -163,6 +163,16 @@ mistaken for the way things have to be.
 
 ## Unreleased
 
+- A write that lands after the settle cap is no longer reported as failed. The cap is the
+  point at which waiting stopped, not proof of failure — a locked screen makes every write
+  slower — and a request declared failed there stayed pending for the next drain to fire
+  again. That is how one logged lunch became two entries.
+- `edit` no longer loses an entry when the re-log is slow. It deletes first by design (a
+  failed delete after a successful re-log would double the day), but then checked for the
+  replacement once and told you to retype it if it had not appeared yet. It now polls, and
+  if the re-log still has not landed it queues it — with the macros scaled to the new
+  portion — so the drain brings it back on its own.
+
 - `day --components` includes the items of saved meals and recipes. Logging a saved Meal
   writes one row per item and none named after the meal, so the default view showed nothing
   and a caller checking whether the write landed concluded it had failed. Totals are
