@@ -37,6 +37,9 @@ CREATE TABLE foodRecord (
   id INTEGER PRIMARY KEY AUTOINCREMENT, foodID TEXT, barcode TEXT, name TEXT,
   brandOwner TEXT, baseUnit TEXT, baseAmount DOUBLE, measures BLOB,
   nutrients BLOB, isHidden INTEGER, dateCreated DATETIME);
+CREATE TABLE mealTypeRecord (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, mealTypeID TEXT, name TEXT,
+  sortIndex INTEGER, disabled INTEGER, alwaysShowInLog INTEGER);
 CREATE TABLE foodCollectionRecord (
   id INTEGER PRIMARY KEY AUTOINCREMENT, collectionID TEXT, collectionEditID TEXT,
   name TEXT, collectionType INTEGER);
@@ -124,6 +127,12 @@ def build(path):
          "Testworks", "serving", 1.0,
          json.dumps([measure("serving", 1, "capsule")]),
          json.dumps({"calories": 0, "zinc": 50})))
+    # The six meal types FoodNoms ships. None carry a name — the app knows
+    # them by id, which is why five and six read as Pre-/Post-Workout.
+    con.executemany(
+        "INSERT INTO mealTypeRecord (mealTypeID, name, sortIndex, disabled, "
+        "alwaysShowInLog) VALUES (?,?,?,?,?)",
+        [(str(i), None, i - 1, 0, 1 if i <= 4 else 0) for i in range(1, 7)])
     con.executemany(
         "INSERT INTO foodCollectionRecord "
         "(collectionID, collectionEditID, name, collectionType) VALUES (?,?,?,?)",

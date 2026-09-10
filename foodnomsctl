@@ -698,7 +698,12 @@ def meal_types(con):
     rows = con.execute("""SELECT mealTypeID, name, sortIndex, disabled
                           FROM mealTypeRecord ORDER BY sortIndex""").fetchall()
     # Defaults carry no name; their identity is the id, in the app's own order.
-    default = {"1": "breakfast", "2": "lunch", "3": "dinner", "4": "snack"}
+    # Five and six are Pre-Workout and Post-Workout — FoodNoms shows those
+    # names in its own meal picker but stores nothing, so calling them meal5
+    # and meal6 meant a real, named, usable meal type could not be asked for.
+    # Confirmed against an entry filed to Post-Workout in the app: mealTypeID 6.
+    default = {"1": "breakfast", "2": "lunch", "3": "dinner", "4": "snack",
+               "5": "pre-workout", "6": "post-workout"}
     out = []
     for i, r in enumerate(rows, start=1):
         label = (r["name"] or default.get(str(r["mealTypeID"]))
@@ -708,7 +713,14 @@ def meal_types(con):
     return out
 
 
+# Spellings a person actually types for the two workout meals.
+MEAL_ALIASES = {"preworkout": "pre-workout", "pre workout": "pre-workout",
+                "postworkout": "post-workout", "post workout": "post-workout",
+                "post-wo": "post-workout", "pre-wo": "pre-workout"}
+
+
 def meal_index(con, want):
+    want = MEAL_ALIASES.get(want.strip().lower(), want)
     for m in meal_types(con):
         if m["name"] == want.lower():
             return m["index"]
